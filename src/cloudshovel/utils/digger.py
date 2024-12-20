@@ -116,7 +116,7 @@ def upload_script_to_bucket(script_name):
 
     base_path = Path(__file__).parent
     
-    f = open(f'{base_path}\\bash_scripts\\{script_name}')
+    f = open(f'{base_path}/bash_scripts/{script_name}')
     script = f.read()
     f.close()
 

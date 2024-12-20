@@ -84,34 +84,38 @@ mount_and_search(){
 
     mkdir /home/ec2-user/OUTPUT/$counter 2>/dev/null
     cd $mount_point
+
+    find . -maxdepth 5 -type f -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort -r > /home/ec2-user/OUTPUT/$counter/all_files.txt
     
-    find . \( ! -path "./proc/*" -a ! -path "./Windows/*" -a ! -path "./usr/*" -a ! -path "./sys/*" -a \
-             ! -path "./mnt/*" -a ! -path "./dev/*" -a ! -path "./tmp/*" -a ! -path "./sbin/*" -a \
-             ! -path "./bin/*" -a ! -path "./lib*" -a ! -path "./boot/*" -a ! -path "./Program Files/*" -a \
-             ! -path "./Program Files (x86)/*" \) \
-             -not -empty > /home/ec2-user/OUTPUT/$counter/all_files_cloud_quarry.txt
+    # find . \( ! -path "./proc/*" -a ! -path "./Windows/*" -a ! -path "./usr/*" -a ! -path "./sys/*" -a \
+    #          ! -path "./mnt/*" -a ! -path "./dev/*" -a ! -path "./tmp/*" -a ! -path "./sbin/*" -a \
+    #          ! -path "./bin/*" -a ! -path "./lib*" -a ! -path "./boot/*" -a ! -path "./Program Files/*" -a \
+    #          ! -path "./Program Files (x86)/*" \) \
+    #          -not -empty > /home/ec2-user/OUTPUT/$counter/all_files_cloud_quarry.txt
 
-    for item in $(find . \( ! -path "./Windows/*" -a ! -path "./Program Files/*" -a ! -path "./Program Files (x86)/*" \) -size -25M \
-                \( -name ".aws" -o -name ".ssh" -o -name "credentials.xml" \
-                -o -name "secrets.yml" -o -name "config.php" -o -name "_history" \
-                -o -name "autologin.conf" -o -name "web.config" -o -name ".env" \
-                -o -name ".git" \) -not -empty)
-    do
-        echo "[+] Found $item. Copying to output..."
-        save_name_item=${item:1}
-        save_name_item=${save_name_item////\\}
-        cp -r $item /home/ec2-user/OUTPUT/$counter/${save_name_item}
-    done
+    # for item in $(find . \( ! -path "./Windows/*" -a ! -path "./Program Files/*" -a ! -path "./Program Files (x86)/*" \) -size -25M \
+    #             \( -name ".aws" -o -name ".ssh" -o -name "credentials.xml" \
+    #             -o -name "secrets.yml" -o -name "config.php" -o -name "_history" \
+    #             -o -name "autologin.conf" -o -name "web.config" -o -name ".env" \
+    #             -o -name ".git" \) -not -empty)
+    # do
+    #     echo "[+] Found $item. Copying to output..."
+    #     save_name_item=${item:1}
+    #     save_name_item=${save_name_item////\\}
+    #     cp -r $item /home/ec2-user/OUTPUT/$counter/${save_name_item}
+    # done
 
-    if [ -d "./var/www" ]; then
-    echo "Web Server Present in /var/www" > /home/ec2-user/OUTPUT/$counter/web_server_true.txt
-    fi
-    if [ -d "./inetpub" ]; then
-        echo "Web Server Present in /inetpub" > /home/ec2-user/OUTPUT/$counter/web_server_true.txt
-    fi
-    if [ -d "./usr/share/nginx/" ]; then
-        echo "Web Server Present in /usr/share/nginx" > /home/ec2-user/OUTPUT/$counter/web_server_true.txt
-    fi
+
+
+    # if [ -d "./var/www" ]; then
+    # echo "Web Server Present in /var/www" > /home/ec2-user/OUTPUT/$counter/web_server_true.txt
+    # fi
+    # if [ -d "./inetpub" ]; then
+    #     echo "Web Server Present in /inetpub" > /home/ec2-user/OUTPUT/$counter/web_server_true.txt
+    # fi
+    # if [ -d "./usr/share/nginx/" ]; then
+    #     echo "Web Server Present in /usr/share/nginx" > /home/ec2-user/OUTPUT/$counter/web_server_true.txt
+    # fi
 
     echo "[x] Unmounting $dev"
     if [ "$fs_type" == "ntfs" ] || [ "$fs_type" == "xfs" ]; then
