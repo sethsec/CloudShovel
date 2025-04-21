@@ -104,15 +104,8 @@ def set_bucket_region(bucket_name):
         return None
 
 def upload_script_to_bucket(script_name):
-    log_success(f'Checking if script {script_name} is already inside the bucket {s3_bucket_name}...')
+    log_success(f'Uploading script {script_name} to bucket {s3_bucket_name}...')
     s3 = boto3_session.client('s3', region_name=s3_bucket_region)
-    response = s3.list_objects_v2(Bucket=s3_bucket_name, Prefix=script_name)
-
-    if 'Contents' in response:
-        log_success(f'Script found')
-        return
-    
-    log_warning(f'Script {script_name} not found in bucket {s3_bucket_name}. Uploading...')
 
     base_path = Path(__file__).parent
     
@@ -121,7 +114,7 @@ def upload_script_to_bucket(script_name):
     f.close()
 
     s3.put_object(Bucket=s3_bucket_name, Body=script, Key=script_name)
-    log_success(f'Script {script_name} uploaded in bucket {s3_bucket_name}')
+    log_success(f'Script {script_name} uploaded to bucket {s3_bucket_name}')
 
 
 def get_instance_profile_secret_searcher(region):

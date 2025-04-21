@@ -36,9 +36,147 @@ check_and_fix_uuid() {
     fi
 }
 
+collect_system_info() {
+    local output_dir=$1
+    local mount_point=$2
+    
+    # Create output directory
+    mkdir -p "$output_dir"
+    
+    # Get list of all files with timestamps
+    echo "[x] Collecting file list with timestamps..."
+    find "$mount_point" -maxdepth 7 -type f \( ! -path "*/proc/*" -a ! -path "*/sys/*" -a ! -path "*/usr/share/man/*" \) -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort -r > "$output_dir/all_files.txt"
+    
+    # Get list of all files without timestamps but with md5sum
+    echo "[x] Collecting file list without timestamps but with md5sum..."
+    find "$mount_point" -maxdepth 7 -type f \( ! -path "*/proc/*" -a ! -path "*/sys/*" -a ! -path "*/usr/share/man/*" \) -exec md5sum {} \; 2>/dev/null > "$output_dir/all_files_without_timestamps_md5sum.txt"
+    
+    # # List files from key directories
+    # echo "[x] Listing files from key directories..."
+    # find "$mount_point/usr/local/bin" "$mount_point/opt" "$mount_point/etc/cron.d" "$mount_point/etc/cron.daily" "$mount_point/etc/cron.hourly" "$mount_point/etc/cron.weekly" "$mount_point/etc/cron.monthly" "$mount_point/var/spool/cron" "$mount_point/home" "$mount_point/root" -type f 2>/dev/null > "$output_dir/files_from_key_dirs.txt"
+    
+    # # List system configuration files
+    # echo "[x] Listing system configuration files..."
+    # find "$mount_point/etc/passwd" "$mount_point/etc/group" "$mount_point/etc/shadow" "$mount_point/etc/sudoers" "$mount_point/etc/hosts" "$mount_point/etc/resolv.conf" "$mount_point/etc/fstab" "$mount_point/etc/crontab" -type f 2>/dev/null > "$output_dir/system_config_files.txt"
+    
+    # # List startup scripts and services
+    # echo "[x] Listing startup scripts and services..."
+    # find "$mount_point/etc/init.d" "$mount_point/etc/rc.d" "$mount_point/etc/systemd/system" "$mount_point/lib/systemd/system" -type f 2>/dev/null > "$output_dir/startup_scripts.txt"
+    
+    # # List network configuration files
+    # echo "[x] Listing network configuration files..."
+    # find "$mount_point/etc/network/interfaces" "$mount_point/etc/sysconfig/network-scripts/ifcfg-*" "$mount_point/etc/netplan/*.yaml" -type f 2>/dev/null > "$output_dir/network_config_files.txt"
+    
+    # # List SSH configuration files
+    # echo "[x] Listing SSH configuration files..."
+    # find "$mount_point/etc/ssh" -type f 2>/dev/null > "$output_dir/ssh_config_files.txt"
+    
+    # # List AWS configuration files
+    # echo "[x] Listing AWS configuration files..."
+    # find "$mount_point/root/.aws" "$mount_point/home/*/.aws" -type f 2>/dev/null > "$output_dir/aws_config_files.txt"
+    
+    # # List suspicious files
+    # echo "[x] Listing suspicious files..."
+    # find "$mount_point" \( -name "*.sh" -o -name "*.py" -o -name "*.pl" -o -name "*.rb" -o -name "*.js" -o -name "*.php" \) -type f -size -1M 2>/dev/null > "$output_dir/suspicious_files.txt"
+    
+    # # List files with unusual permissions
+    # echo "[x] Listing files with unusual permissions..."
+    # find "$mount_point" -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null > "$output_dir/suid_sgid_files.txt"
+    
+    # # List files modified in last 30 days
+    # echo "[x] Listing recently modified files..."
+    # find "$mount_point" -maxdepth 7 -type f \( ! -path "*/proc/*" -a ! -path "*/sys/*" -a ! -path "*/usr/share/man/*" \) -mtime -30 2>/dev/null > "$output_dir/recent_files.txt"
+    
+    # # List large files
+    # echo "[x] Listing large files..."
+    # find "$mount_point" -type f -size +10M 2>/dev/null > "$output_dir/large_files.txt"
+
+    # # List dot files
+    # echo "[x] Listing dot files..."
+    # find "$mount_point" -type f -name ".*" 2>/dev/null > "$output_dir/dot_files.txt"
+
+    # # List all files and hash them
+    # echo "[x] Listing all files and hashing them md5sum..."
+    # find "$mount_point" -type f -exec md5sum {} \; 2>/dev/null > "$output_dir/all_files_md5sum.txt"
+    
+
+    # Original commented out code for reference:
+    # Collect files from key directories
+    # echo "[x] Collecting files from key directories..."
+    # for dir in "$mount_point/usr/local/bin" "$mount_point/opt" "$mount_point/etc/cron.d" "$mount_point/etc/cron.daily" "$mount_point/etc/cron.hourly" "$mount_point/etc/cron.weekly" "$mount_point/etc/cron.monthly" "$mount_point/var/spool/cron" "$mount_point/home" "$mount_point/root"; do
+    #     if [ -d "$dir" ]; then
+    #         dir_name=$(basename "$dir")
+    #         mkdir -p "$output_dir/key_dirs/$dir_name"
+    #         find "$dir" -type f -exec cp --parents {} "$output_dir/key_dirs/" \;
+    #     fi
+    # done
+    
+    # # Collect system configuration files
+    # echo "[x] Collecting system configuration files..."
+    # for conf_file in "$mount_point/etc/passwd" "$mount_point/etc/group" "$mount_point/etc/shadow" "$mount_point/etc/sudoers" "$mount_point/etc/hosts" "$mount_point/etc/resolv.conf" "$mount_point/etc/fstab" "$mount_point/etc/crontab"; do
+    #     if [ -f "$conf_file" ]; then
+    #         cp --parents "$conf_file" "$output_dir/system_config/"
+    #     fi
+    # done
+    
+    # # Collect startup scripts and services
+    # echo "[x] Collecting startup scripts and services..."
+    # for dir in "$mount_point/etc/init.d" "$mount_point/etc/rc.d" "$mount_point/etc/systemd/system" "$mount_point/lib/systemd/system"; do
+    #     if [ -d "$dir" ]; then
+    #         dir_name=$(basename "$dir")
+    #         mkdir -p "$output_dir/startup_scripts/$dir_name"
+    #         find "$dir" -type f -exec cp --parents {} "$output_dir/startup_scripts/" \;
+    #     fi
+    # done
+    
+    # # Collect network configuration
+    # echo "[x] Collecting network configuration..."
+    # for net_file in "$mount_point/etc/network/interfaces" "$mount_point/etc/sysconfig/network-scripts/ifcfg-*" "$mount_point/etc/netplan/*.yaml"; do
+    #     if [ -f "$net_file" ]; then
+    #         cp --parents "$net_file" "$output_dir/network_config/"
+    #     fi
+    # done
+    
+    # # Collect SSH configuration and keys
+    # echo "[x] Collecting SSH configuration..."
+    # if [ -d "$mount_point/etc/ssh" ]; then
+    #     mkdir -p "$output_dir/ssh_config"
+    #     find "$mount_point/etc/ssh" -type f -exec cp --parents {} "$output_dir/ssh_config/" \;
+    # fi
+    
+    # # Collect AWS configuration
+    # echo "[x] Collecting AWS configuration..."
+    # for aws_dir in "$mount_point/root/.aws" "$mount_point/home/*/.aws"; do
+    #     if [ -d "$aws_dir" ]; then
+    #         mkdir -p "$output_dir/aws_config"
+    #         find "$aws_dir" -type f -exec cp --parents {} "$output_dir/aws_config/" \;
+    #     fi
+    # done
+    
+    # # Collect suspicious files and directories
+    # echo "[x] Collecting suspicious files..."
+    # find "$mount_point" \( -name "*.sh" -o -name "*.py" -o -name "*.pl" -o -name "*.rb" -o -name "*.js" -o -name "*.php" \) -type f -size -1M -exec cp --parents {} "$output_dir/suspicious_files/" \;
+    
+    # # Collect files with unusual permissions
+    # echo "[x] Collecting files with unusual permissions..."
+    # find "$mount_point" -type f \( -perm -4000 -o -perm -2000 \) -exec ls -la {} \; > "$output_dir/suid_sgid_files.txt"
+    
+    # # Collect files modified in last 30 days
+    # echo "[x] Collecting recently modified files..."
+    # find "$mount_point" -maxdepth 7 -type f \( ! -path "*/proc/*" -a ! -path "*/sys/*" -a ! -path "*/usr/share/man/*" \) -mtime -30 -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort -r > "$output_dir/recent_files.txt"
+    
+    # # Collect large files
+    # echo "[x] Collecting large files..."
+    # find "$mount_point" -type f -size +10M -exec ls -lh {} \; > "$output_dir/large_files.txt"
+    
+    # # Collect empty directories (potential mount points)
+    # echo "[x] Collecting empty directories..."
+    # find "$mount_point" -type d -empty > "$output_dir/empty_dirs.txt"
+}
+
 mount_and_search(){
     if [ $# -lt 1 ]; then
-        echo " [!] Function $0 requires 1 argument. Something went wrong since no arguments were passed."
+        echo "[!] Function $0 requires 1 argument. Something went wrong since no arguments were passed."
         return 1
     fi
 
@@ -82,40 +220,12 @@ mount_and_search(){
         fi
     fi
 
-    mkdir /home/ec2-user/OUTPUT/$counter 2>/dev/null
-    cd $mount_point
-
-    find . -maxdepth 5 -type f -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort -r > /home/ec2-user/OUTPUT/$counter/all_files.txt
+    # Create output directory for this volume
+    output_dir="/home/ec2-user/OUTPUT/$counter"
+    mkdir -p "$output_dir"
     
-    # find . \( ! -path "./proc/*" -a ! -path "./Windows/*" -a ! -path "./usr/*" -a ! -path "./sys/*" -a \
-    #          ! -path "./mnt/*" -a ! -path "./dev/*" -a ! -path "./tmp/*" -a ! -path "./sbin/*" -a \
-    #          ! -path "./bin/*" -a ! -path "./lib*" -a ! -path "./boot/*" -a ! -path "./Program Files/*" -a \
-    #          ! -path "./Program Files (x86)/*" \) \
-    #          -not -empty > /home/ec2-user/OUTPUT/$counter/all_files_cloud_quarry.txt
-
-    # for item in $(find . \( ! -path "./Windows/*" -a ! -path "./Program Files/*" -a ! -path "./Program Files (x86)/*" \) -size -25M \
-    #             \( -name ".aws" -o -name ".ssh" -o -name "credentials.xml" \
-    #             -o -name "secrets.yml" -o -name "config.php" -o -name "_history" \
-    #             -o -name "autologin.conf" -o -name "web.config" -o -name ".env" \
-    #             -o -name ".git" \) -not -empty)
-    # do
-    #     echo "[+] Found $item. Copying to output..."
-    #     save_name_item=${item:1}
-    #     save_name_item=${save_name_item////\\}
-    #     cp -r $item /home/ec2-user/OUTPUT/$counter/${save_name_item}
-    # done
-
-
-
-    # if [ -d "./var/www" ]; then
-    # echo "Web Server Present in /var/www" > /home/ec2-user/OUTPUT/$counter/web_server_true.txt
-    # fi
-    # if [ -d "./inetpub" ]; then
-    #     echo "Web Server Present in /inetpub" > /home/ec2-user/OUTPUT/$counter/web_server_true.txt
-    # fi
-    # if [ -d "./usr/share/nginx/" ]; then
-    #     echo "Web Server Present in /usr/share/nginx" > /home/ec2-user/OUTPUT/$counter/web_server_true.txt
-    # fi
+    # Collect system information
+    collect_system_info "$output_dir" "$mount_point"
 
     echo "[x] Unmounting $dev"
     if [ "$fs_type" == "ntfs" ] || [ "$fs_type" == "xfs" ]; then
@@ -140,12 +250,12 @@ for dev in "$@"; do
     for device in $(blkid -o device -u filesystem ${dev}*); do if mount_and_search $device; then ((counter++)) && something_was_searched=1 && device_was_searched=1; fi done
 
     if [ $device_was_searched -eq 0 ]; then
-        echo " [!] Mounting and secret searching for $dev did not work" 
+        echo "[!] Mounting and secret searching for $dev did not work" 
     fi
 done
 
 if [ $something_was_searched -eq 0 ]; then
-    echo " [!] Mounting or scanning not successful. Check output for lsblk:"
+    echo "[!] Mounting or scanning not successful. Check output for lsblk:"
     lsblk --output NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,UUID,LABEL
     exit 3
 fi
