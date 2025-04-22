@@ -195,21 +195,21 @@ def wait_for_instance_status(instance_id, desired_status, region):
 def create_secret_searcher(region, instance_profile_arn):
     ec2 = boto3_session.client('ec2', region)
 
-    log_success('Checking if a secret searcher is already running in this region...')
-    instances = ec2.describe_instances(Filters=[{'Name':'tag-key', 'Values':['usage']},
-                                                {'Name':'tag-value','Values':['SecretSearcher']},
-                                                {'Name':'instance-state-name', 'Values':['pending','running']}])
+    # log_success('Checking if a secret searcher is already running in this region...')
+    # instances = ec2.describe_instances(Filters=[{'Name':'tag-key', 'Values':['usage']},
+    #                                             {'Name':'tag-value','Values':['SecretSearcher']},
+    #                                             {'Name':'instance-state-name', 'Values':['pending','running']}])
 
-    if len(instances['Reservations']) > 0:
-        instance_id = instances['Reservations'][0]['Instances'][0]['InstanceId']
+    # if len(instances['Reservations']) > 0:
+    #     instance_id = instances['Reservations'][0]['Instances'][0]['InstanceId']
 
-        log_success(f'Secret searcher found: {instance_id}')
-        log_success(f"Checking and waiting the instance to be in 'running' state")
+    #     log_success(f'Secret searcher found: {instance_id}')
+    #     log_success(f"Checking and waiting the instance to be in 'running' state")
 
-        wait_for_instance_status(instance_id, 'running', region)
+    #     wait_for_instance_status(instance_id, 'running', region)
 
-        log_success(f'Secret searcher is ready and running in this region')
-        return instance_id
+    #     log_success(f'Secret searcher is ready and running in this region')
+    #     return instance_id
 
     log_warning('No secret searcher instance found. Starting creation process...')
     log_success('Getting AMI for latest Amazon Linux 202* for current region...')
@@ -269,7 +269,7 @@ def install_searching_tools(instance_id, region, is_windows=False):
 
         if output['Status'] != 'Success':
             log_error(f'Installation failed. Please check what went wrong or install it manually and disable this step. Exiting...')
-            cleanup()
+            cleanup(region)
             exit()
 
     log_success(f'Copying {scanning_script_name} from S3 bucket {s3_bucket_name} to Secret Searcher instance {instance_id} using SSM...')
@@ -481,39 +481,46 @@ def delete_volumes(volume_ids, region):
     log_warning("All volumes were set for deletion. The script doesn't wait for deletion confirmation. Please check manually if everything was deleted.")
 
 
-def cleanup(region):
+def cleanup(region, instance_id=None):
     log_warning('Starting cleanup (the S3 bucket will not be deleted)...')
     ec2 = boto3_session.client('ec2', region)
 
-    log_success('Deleting EC2 secret searcher instance...')
-    instances = ec2.describe_instances(Filters=[{'Name':'tag-key', 'Values':['usage']},
+    if instance_id:
+        log_success(f'Deleting EC2 secret searcher instance {instance_id}...')
+        try:
+            ec2.terminate_instances(InstanceIds=[instance_id])
+            log_success(f'Instance {instance_id} terminated')
+        except Exception as e:
+            log_error(f'Error terminating instance {instance_id}: {str(e)}')
+    else:
+        log_success('Deleting EC2 secret searcher instance...')
+        instances = ec2.describe_instances(Filters=[{'Name':'tag-key', 'Values':['usage']},
                                                 {'Name':'tag-value','Values':['SecretSearcher']},
                                                 {'Name':'instance-state-name', 'Values':['pending','running']}])
 
-    if len(instances['Reservations']) == 0:
-        log_warning('No secret searcher instance found. Continuing with next resource')
-    else:
-        # should be only one instance, but just to be sure
-        instance_ids = [x['InstanceId'] for x in instances['Reservations'][0]['Instances']]
-        log_success(f'Terminating instances: {instance_ids}')
-        ec2.terminate_instances(InstanceIds=instance_ids)
+        if len(instances['Reservations']) == 0:
+            log_warning('No secret searcher instance found. Continuing with next resource')
+            # should be only one instance, but just to be sure
+            instance_ids = [x['InstanceId'] for x in instances['Reservations'][0]['Instances']]
+            log_success(f'Terminating instances: {instance_ids}')
+            ec2.terminate_instances(InstanceIds=instance_ids)
 
-    iam = boto3_session.client('iam')
+    # iam = boto3_session.client('iam')
     
-    log_success('Deleting role and instance profile...')
-    try:
-        iam.remove_role_from_instance_profile(InstanceProfileName=secret_searcher_role_name, RoleName=secret_searcher_role_name)
-        iam.delete_instance_profile(InstanceProfileName=secret_searcher_role_name)
-        iam.detach_role_policy(RoleName=secret_searcher_role_name, PolicyArn='arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore')
-        iam.detach_role_policy(RoleName=secret_searcher_role_name, PolicyArn='arn:aws:iam::aws:policy/AmazonS3FullAccess')
-        iam.delete_role(RoleName=secret_searcher_role_name)
-        log_success('Role and instance profile deleted')
-    except ClientError as e:
-        if e.response['Error']['Code'] != 'NoSuchEntity':
-            log_error(f'Unknown error: {e["Error"]["Code"]}. Exiting...')
-            exit()
-        else:
-            log_success(f'No role {secret_searcher_role_name} found.')
+    # log_success('Deleting role and instance profile...')
+    # try:
+    #     iam.remove_role_from_instance_profile(InstanceProfileName=secret_searcher_role_name, RoleName=secret_searcher_role_name)
+    #     iam.delete_instance_profile(InstanceProfileName=secret_searcher_role_name)
+    #     iam.detach_role_policy(RoleName=secret_searcher_role_name, PolicyArn='arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore')
+    #     iam.detach_role_policy(RoleName=secret_searcher_role_name, PolicyArn='arn:aws:iam::aws:policy/AmazonS3FullAccess')
+    #     iam.delete_role(RoleName=secret_searcher_role_name)
+    #     log_success('Role and instance profile deleted')
+    # except ClientError as e:
+    #     if e.response['Error']['Code'] != 'NoSuchEntity':
+    #         log_error(f'Unknown error: {e["Error"]["Code"]}. Exiting...')
+    #         exit()
+    #     else:
+    #         log_success(f'No role {secret_searcher_role_name} found.')
 
 
 init()  # Initialize colorama
@@ -575,7 +582,7 @@ def dig(args, session):
         log_success(f"Total duration for ami {target_ami['ImageId']}: {int((time.time() - start_scan_time))} seconds")
         log_success(f'Scan finished. Check results in s3://{s3_bucket_name}')
     finally:
-        cleanup(region)
+        cleanup(region, instance_id=instance['instanceId'])
             
 
 if __name__ == '__main__':
