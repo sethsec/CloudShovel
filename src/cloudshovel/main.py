@@ -30,7 +30,7 @@ def parse_args():
 
     return parser.parse_args()
 
-
+# Create the create_boto3_session function that first tries to create a session using the environment variables, and only if that fails does it look for the profile and then the args
 def create_boto3_session(args):
     session_kwargs = {'region_name': args.region}
 
@@ -45,20 +45,26 @@ def create_boto3_session(args):
             session_kwargs['aws_session_token'] = args.session_token
 
     try:
+        session = boto3.Session()
+        # Test the session by making a simple API call
+        identity = session.client('sts').get_caller_identity()
+        log_warning(f'The script will run using the identity {identity["Arn"]}')
+        return session
+    except botocore.exceptions.ClientError as e:
+        log_error(f"Failed to create boto3 session: {str(e)}")
+       
+
+
+    try:
         session = boto3.Session(**session_kwargs)
         # Test the session by making a simple API call
         identity = session.client('sts').get_caller_identity()
         log_warning(f'The script will run using the identity {identity["Arn"]}')
-        # confirmation = input("Please confirm if you want to continue by typing 'yes' [yes/NO]:")
-
-        # if confirmation != 'yes':
-        #     log_warning('The execution will end now. Exiting...')
-        #     exit()
-
         return session
     except botocore.exceptions.ClientError as e:
         log_error(f"Failed to create boto3 session: {str(e)}")
         exit()
+
 
 
 def main():
