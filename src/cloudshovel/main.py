@@ -49,11 +49,11 @@ def create_boto3_session(args):
         # Test the session by making a simple API call
         identity = session.client('sts').get_caller_identity()
         log_warning(f'The script will run using the identity {identity["Arn"]}')
-        confirmation = input("Please confirm if you want to continue by typing 'yes' [yes/NO]:")
+        # confirmation = input("Please confirm if you want to continue by typing 'yes' [yes/NO]:")
 
-        if confirmation != 'yes':
-            log_warning('The execution will end now. Exiting...')
-            exit()
+        # if confirmation != 'yes':
+        #     log_warning('The execution will end now. Exiting...')
+        #     exit()
 
         return session
     except botocore.exceptions.ClientError as e:
