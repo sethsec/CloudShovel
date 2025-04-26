@@ -233,7 +233,7 @@ def create_secret_searcher(region, instance_profile_arn):
                             MinCount=1,
                             MaxCount=1,
                             BlockDeviceMappings=[{'DeviceName':'/dev/xvda', 'Ebs': {'VolumeSize': 50}}],
-                            TagSpecifications=[{'ResourceType': 'instance', 'Tags':[{'Key': 'usage', 'Value': 'SecretSearcher'}]}])
+                            TagSpecifications=[{'ResourceType': 'instance', 'Tags':[{'Key': 'usage', 'Value': 'SecretSearcher', 'Key': 'Name', 'Value': 'SecretSearcher'}]}],)
     
     instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
     log_success(f"Secret Searcher instance {instance_id} created. Waiting for instance to be in 'running' state...")
@@ -269,7 +269,7 @@ def install_searching_tools(instance_id, region, is_windows=False):
 
         if output['Status'] != 'Success':
             log_error(f'Installation failed. Please check what went wrong or install it manually and disable this step. Exiting...')
-            cleanup(region)
+            cleanup(region, instance_id=instance_id)
             exit()
 
     log_success(f'Copying {scanning_script_name} from S3 bucket {s3_bucket_name} to Secret Searcher instance {instance_id} using SSM...')
@@ -354,7 +354,7 @@ def start_instance_with_target_ami(ami_object, region, is_ena=False):
             log_error(f"Something went wrong when launching instance with AMI {ami_object['ImageId']}: {str(e)}")
             log_error("To fix this you might need to edit the script and change the instance type to be compatible with the AMIs requirements. Check instance types here: https://aws.amazon.com/ec2/instance-types/")
             log_error("Script can't resume execution and will exit...")
-            cleanup()
+            cleanup(region, instance_id=instance_id)
             exit()
 
 def stop_instance(instance_ids, region):
