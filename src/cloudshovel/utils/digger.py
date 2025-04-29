@@ -7,7 +7,7 @@ from colorama import init, Fore, Style
 
 availability_zone = 'a'
 secret_searcher_role_name = 'minimal-ssm'
-tags = [{'Key': 'usage', 'Value': 'CloudQuarry'}]
+tags = [{'Key': 'usage', 'Value': 'CloudQuarry', 'Key': 'Name', 'Value': 'whoami-EBS-volume-copy'}]
 devices = ['/dev/sdf',
            '/dev/sdg',
            '/dev/sdh',
@@ -192,57 +192,146 @@ def wait_for_instance_status(instance_id, desired_status, region):
     log_success(f'Instance {instance_id} reached the status \'{desired_status}\'')
 
 
+# def create_secret_searcher(region, instance_profile_arn):
+#     ec2 = boto3_session.client('ec2', region)
+
+#     # log_success('Checking if a secret searcher is already running in this region...')
+#     # instances = ec2.describe_instances(Filters=[{'Name':'tag-key', 'Values':['usage']},
+#     #                                             {'Name':'tag-value','Values':['SecretSearcher']},
+#     #                                             {'Name':'instance-state-name', 'Values':['pending','running']}])
+
+#     # if len(instances['Reservations']) > 0:
+#     #     instance_id = instances['Reservations'][0]['Instances'][0]['InstanceId']
+
+#     #     log_success(f'Secret searcher found: {instance_id}')
+#     #     log_success(f"Checking and waiting the instance to be in 'running' state")
+
+#     #     wait_for_instance_status(instance_id, 'running', region)
+
+#     #     log_success(f'Secret searcher is ready and running in this region')
+#     #     return instance_id
+
+#     log_warning('No secret searcher instance found. Starting creation process...')
+#     log_success('Getting AMI for latest Amazon Linux 202* for current region...')
+
+#     response = ec2.describe_images(Filters=[{'Name':'name','Values':['al202*-ami-202*-x86_64']}],
+#                                      Owners=['amazon'])
+
+#     sorted_images = sorted(
+#             response['Images'],
+#             key=lambda x: datetime.strptime(x['CreationDate'], '%Y-%m-%dT%H:%M:%S.%fZ'),
+#             reverse=True
+#         )
+
+#     amazon_ami_id = sorted_images[0]['ImageId']
+
+#     log_success(f'Creating Secret Searcher instance based on official and most recent Amazon Image AMI {amazon_ami_id}...')
+#     secret_searcher_instance = ec2.run_instances(InstanceType='c5.large',
+#                             Placement={'AvailabilityZone':f'{region}{availability_zone}'},
+#                             IamInstanceProfile ={'Arn':instance_profile_arn},
+#                             ImageId=amazon_ami_id,
+#                             MinCount=1,
+#                             MaxCount=1,
+#                             BlockDeviceMappings=[{'DeviceName':'/dev/xvda', 'Ebs': {'VolumeSize': 50}}],
+#                             TagSpecifications=[{'ResourceType': 'instance', 'Tags':[{'Key': 'usage', 'Value': 'whoAMI-filesystem-scanner', 'Key': 'Name', 'Value': 'whoAMI-filesystem-scanner'}]}],)
+    
+#     instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
+#     log_success(f"Secret Searcher instance {instance_id} created. Waiting for instance to be in 'running' state...")
+    
+#     wait_for_instance_status(instance_id, 'running', region)
+#     log_success('Waiting 1 more min for the instance to start SSM Agent')
+#     time.sleep(60)
+
+#     return instance_id
+
 def create_secret_searcher(region, instance_profile_arn):
     ec2 = boto3_session.client('ec2', region)
 
-    # log_success('Checking if a secret searcher is already running in this region...')
-    # instances = ec2.describe_instances(Filters=[{'Name':'tag-key', 'Values':['usage']},
-    #                                             {'Name':'tag-value','Values':['SecretSearcher']},
-    #                                             {'Name':'instance-state-name', 'Values':['pending','running']}])
-
-    # if len(instances['Reservations']) > 0:
-    #     instance_id = instances['Reservations'][0]['Instances'][0]['InstanceId']
-
-    #     log_success(f'Secret searcher found: {instance_id}')
-    #     log_success(f"Checking and waiting the instance to be in 'running' state")
-
-    #     wait_for_instance_status(instance_id, 'running', region)
-
-    #     log_success(f'Secret searcher is ready and running in this region')
-    #     return instance_id
+    preferred_instance_types = ['c5.large', 'm5.large', 't3.large']  # try these in order
+    use_on_demand_fallback = True  # Set this to False if you only want spot instances
 
     log_warning('No secret searcher instance found. Starting creation process...')
     log_success('Getting AMI for latest Amazon Linux 202* for current region...')
 
-    response = ec2.describe_images(Filters=[{'Name':'name','Values':['al202*-ami-202*-x86_64']}],
-                                     Owners=['amazon'])
+    response = ec2.describe_images(
+        Filters=[{'Name': 'name', 'Values': ['al202*-ami-202*-x86_64']}],
+        Owners=['amazon']
+    )
 
     sorted_images = sorted(
-            response['Images'],
-            key=lambda x: datetime.strptime(x['CreationDate'], '%Y-%m-%dT%H:%M:%S.%fZ'),
-            reverse=True
-        )
+        response['Images'],
+        key=lambda x: datetime.strptime(x['CreationDate'], '%Y-%m-%dT%H:%M:%S.%fZ'),
+        reverse=True
+    )
 
     amazon_ami_id = sorted_images[0]['ImageId']
+    log_success(f'Found Amazon Linux AMI {amazon_ami_id}')
 
-    log_success(f'Creating Secret Searcher instance based on official and most recent Amazon Image AMI {amazon_ami_id}...')
-    secret_searcher_instance = ec2.run_instances(InstanceType='c5.large',
-                            Placement={'AvailabilityZone':f'{region}{availability_zone}'},
-                            IamInstanceProfile ={'Arn':instance_profile_arn},
-                            ImageId=amazon_ami_id,
-                            MinCount=1,
-                            MaxCount=1,
-                            BlockDeviceMappings=[{'DeviceName':'/dev/xvda', 'Ebs': {'VolumeSize': 50}}],
-                            TagSpecifications=[{'ResourceType': 'instance', 'Tags':[{'Key': 'usage', 'Value': 'SecretSearcher', 'Key': 'Name', 'Value': 'SecretSearcher'}]}],)
-    
-    instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
-    log_success(f"Secret Searcher instance {instance_id} created. Waiting for instance to be in 'running' state...")
-    
-    wait_for_instance_status(instance_id, 'running', region)
-    log_success('Waiting 1 more min for the instance to start SSM Agent')
-    time.sleep(60)
+    for instance_type in preferred_instance_types:
+        log_success(f'Trying to launch Secret Searcher as spot instance type {instance_type}...')
+        try:
+            instance_params = {
+                'InstanceType': instance_type,
+                'Placement': {'AvailabilityZone': f'{region}{availability_zone}'},
+                'IamInstanceProfile': {'Arn': instance_profile_arn},
+                'ImageId': amazon_ami_id,
+                'MinCount': 1,
+                'MaxCount': 1,
+                'BlockDeviceMappings': [{'DeviceName': '/dev/xvda', 'Ebs': {'VolumeSize': 50}}],
+                'TagSpecifications': [{
+                    'ResourceType': 'instance',
+                    'Tags': [
+                        {'Key': 'usage', 'Value': 'whoAMI-filesystem-scanner'},
+                        {'Key': 'Name', 'Value': 'whoAMI-filesystem-scanner'}
+                    ]
+                }],
+                'InstanceMarketOptions': {
+                    'MarketType': 'spot',
+                    'SpotOptions': {
+                        'SpotInstanceType': 'one-time',
+                        'InstanceInterruptionBehavior': 'terminate'
+                    }
+                }
+            }
 
-    return instance_id
+            secret_searcher_instance = ec2.run_instances(**instance_params)
+            instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
+
+            log_success(f"Spot instance {instance_id} created with type {instance_type}. Waiting for it to be in 'running' state...")
+            wait_for_instance_status(instance_id, 'running', region)
+
+            log_success('Waiting 1 more min for the instance to start SSM Agent')
+            time.sleep(60)
+            return instance_id
+
+        except Exception as e:
+            log_warning(f"Spot instance launch failed for {instance_type}: {str(e)}")
+            continue
+
+    if use_on_demand_fallback:
+        log_warning('All spot attempts failed. Trying to launch an on-demand instance instead...')
+        try:
+            instance_params.pop('InstanceMarketOptions', None)  # Remove spot market option
+            instance_params['InstanceType'] = 't3.large'  # use a default reliable type
+
+            secret_searcher_instance = ec2.run_instances(**instance_params)
+            instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
+
+            log_success(f"On-demand instance {instance_id} created. Waiting for it to be in 'running' state...")
+            wait_for_instance_status(instance_id, 'running', region)
+
+            log_success('Waiting 1 more min for the instance to start SSM Agent')
+            time.sleep(60)
+            return instance_id
+
+        except Exception as e:
+            log_error(f"Failed to launch even on-demand instance: {str(e)}")
+            raise
+
+    else:
+        log_error('Failed to launch Secret Searcher with any spot instance type.')
+        raise Exception('No spot capacity available and fallback disabled')
+
 
 
 def install_searching_tools(instance_id, region, is_windows=False):
@@ -303,59 +392,68 @@ def get_targets(region, os='all'):
         windows_targets = [x for x in targets if 'Platform' in x]
         return windows_targets
 
-def start_instance_with_target_ami(ami_object, region, is_ena=False):
+def start_instance_with_target_ami(ami_object, region, is_ena=False, tried_types=None):
     ec2 = boto3_session.client('ec2', region)
-    log_success(f"Starting EC2 instance for AMI {ami_object['ImageId']}...")
+    ami_id = ami_object['ImageId']
+    architecture = ami_object.get('Architecture', 'x86_64')
+    tried_types = tried_types or []
+
+    ARCH_INSTANCE_MAP = {
+        "x86_64": ["c5.large", "t2.medium", "c3.large"],
+        "arm64": ["t4g.small", "c7g.large", "m6g.medium"]
+    }
+
+    fallback_types = [t for t in ARCH_INSTANCE_MAP.get(architecture, []) if t not in tried_types]
+    if not fallback_types:
+        log_error(f"All instance types for architecture '{architecture}' have been tried and failed.")
+        exit(1)
+
+    instance_type = fallback_types[0]
+    tried_types.append(instance_type)
+
+    log_success(f"Attempting to launch {architecture} instance with type {instance_type} for AMI {ami_id}...")
 
     try:
-        instance_type = 'c5.large'
-        if 'VirtualizationType' in ami_object and ami_object['VirtualizationType'] == 'paravirtual':
-            log_warning('VirtualizationType is paravirtual. Instance type will be changed from c5.large to c3.large')
-            instance_type = 'c3.large'
-        elif is_ena:
-            log_warning('ENA support is required. Instance type will be changed from c5.large to t2.medium and will have a public IP address.')
-            instance_type = 't2.medium'
-        
-        instance = None
-        if is_ena == False:
-            instance = ec2.run_instances(InstanceType=instance_type,
-                                    Placement={'AvailabilityZone':f'{region}{availability_zone}'},
-                                    NetworkInterfaces=[{'AssociatePublicIpAddress':False, 'DeviceIndex':0}],
-                                    MaxCount=1, MinCount=1,
-                                    ImageId=ami_object['ImageId'],
-                                    TagSpecifications=[{'ResourceType': 'instance', 'Tags':tags}])
-        else:
-            instance = ec2.run_instances(InstanceType=instance_type,
-                                    Placement={'AvailabilityZone':f'{region}{availability_zone}'},
-                                    MaxCount=1, MinCount=1,
-                                    ImageId=ami_object['ImageId'],
-                                    TagSpecifications=[{'ResourceType': 'instance', 'Tags':tags}])
-        
+        instance_params = {
+            'InstanceType': instance_type,
+            'Placement': {'AvailabilityZone': f'{region}{availability_zone}'},
+            'MaxCount': 1,
+            'MinCount': 1,
+            'ImageId': ami_id,
+            'TagSpecifications': [{
+                'ResourceType': 'instance',
+                'Tags': [
+                    {'Key': 'usage', 'Value': 'whoAMI-filesystem-duplicator'},
+                    {'Key': 'Name', 'Value': f'whoAMI-filesystem--duplicator-ami-{ami_id}'}
+                ]
+            }]
+        }
+
+        if not is_ena:
+            instance_params['NetworkInterfaces'] = [{
+                'AssociatePublicIpAddress': False,
+                'DeviceIndex': 0
+            }]
+
+        instance = ec2.run_instances(**instance_params)
+
         instance_id = instance['Instances'][0]['InstanceId']
         log_success(f"Instance {instance_id} created. Waiting to be in 'running' state...")
 
         waiter = ec2.get_waiter('instance_running')
         waiter.wait(InstanceIds=[instance_id], WaiterConfig={'Delay': 5, 'MaxAttempts': 120})
 
-        log_success(f"Instance {instance_id} based on ami {ami_object['ImageId']} is ready")
+        log_success(f"Instance {instance_id} based on AMI {ami_id} is ready")
+        return {"instanceId": instance_id, "ami": ami_id}
 
-        return {"instanceId": instance_id, "ami": ami_object['ImageId']}
     except Exception as e:
-        error = 'failed '
-        if hasattr(e, 'message'):
-            error = f'{error}  {e.message}'
+        error = str(e)
+        if '(ENA)' in error and not is_ena:
+            log_warning(f"AMI {ami_id} requires ENA support. Retrying with ENA-compatible settings...")
+            return start_instance_with_target_ami(ami_object, region, is_ena=True, tried_types=tried_types)
         else:
-            error = f'{error}  {e}'
-
-        if '(ENA)' in error and is_ena == False:
-            log_warning(f'AMI {ami_object["ImageId"]} requires ENA support. Attempting to start the instance again with ENA support compatibility...')
-            return start_instance_with_target_ami(ami_object, region, is_ena=True)
-        else:
-            log_error(f"Something went wrong when launching instance with AMI {ami_object['ImageId']}: {str(e)}")
-            log_error("To fix this you might need to edit the script and change the instance type to be compatible with the AMIs requirements. Check instance types here: https://aws.amazon.com/ec2/instance-types/")
-            log_error("Script can't resume execution and will exit...")
-            cleanup(region, instance_id=instance_id)
-            exit()
+            log_warning(f"Failed to launch instance with {instance_type}. Error: {error}")
+            return start_instance_with_target_ami(ami_object, region, is_ena=is_ena, tried_types=tried_types)
 
 def stop_instance(instance_ids, region):
     try:

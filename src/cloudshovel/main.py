@@ -46,26 +46,22 @@ def create_boto3_session(args):
 
     try:
         session = boto3.Session()
-        # Test the session by making a simple API call
         identity = session.client('sts').get_caller_identity()
         log_warning(f'The script will run using the identity {identity["Arn"]}')
         return session
-    except botocore.exceptions.ClientError as e:
-        log_error(f"Failed to create boto3 session: {str(e)}")
-       
-
-
-    try:
-        session = boto3.Session(**session_kwargs)
-        # Test the session by making a simple API call
-        identity = session.client('sts').get_caller_identity()
-        log_warning(f'The script will run using the identity {identity["Arn"]}')
-        return session
-    except botocore.exceptions.ClientError as e:
-        log_error(f"Failed to create boto3 session: {str(e)}")
-        exit()
-
-
+    except (botocore.exceptions.ClientError, botocore.exceptions.NoCredentialsError) as e:
+        log_warning(f"Failed to create default boto3 session: {str(e)}")
+        log_warning("Attempting to create session with provided credentials...")
+        try:
+            session = boto3.Session(**session_kwargs)
+            print("Testing session with provided credentials...")
+            identity = session.client('sts').get_caller_identity()
+            print(identity)
+            log_warning(f'The script will run using the identity {identity["Arn"]}')
+            return session
+        except (botocore.exceptions.ClientError, botocore.exceptions.NoCredentialsError) as e:
+            log_error(f"Failed to create boto3 session with provided credentials: {str(e)}")
+            exit()
 
 def main():
     args = parse_args()
