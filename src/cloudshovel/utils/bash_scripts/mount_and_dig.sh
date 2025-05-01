@@ -51,7 +51,7 @@ collect_system_info() {
     
     # Get list of all files without timestamps but with md5sum
     echo "[x] Collecting file list without timestamps but with md5sum..."
-    find "$mount_point" -maxdepth 7 -type f \( ! -path "$mount_point/proc/*" -a ! -path "$mount_point/sys/*" -a ! -path "$mount_point/usr/share/man/*" -a ! -path "$mount_point/usr/src/*"\) -exec md5sum {} \; 2>/dev/null > "$output_dir/all_files_without_timestamps_md5sum.txt"
+    find "$mount_point" -maxdepth 7 -type f \( ! -path "$mount_point/proc/*" -a ! -path "$mount_point/sys/*" -a ! -path "$mount_point/usr/share/man/*" -a ! -path "$mount_point/usr/src/*" \) -exec md5sum {} \; 2>/dev/null > "$output_dir/all_files_without_timestamps_md5sum.txt"
     sed -i "s|$mount_point/|/|" "$output_dir/all_files_without_timestamps_md5sum.txt"    
 
     # # List files from key directories
