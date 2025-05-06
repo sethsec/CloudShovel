@@ -475,6 +475,8 @@ def move_volumes_and_terminate_instance(instance_id, instance_id_secret_searcher
     volumes = ec2.describe_volumes(Filters=[{'Name':'attachment.instance-id', 'Values':[instance_id]}])
     volume_ids = [x['VolumeId'] for x in volumes['Volumes']]
 
+    # Print number of volumes
+    log_success(f'Number of volumes: {len(volume_ids)}')
     if len(devices) < len(volume_ids):
         log_error('Target AMI has more EBS volumes than the number of supported EBS volumes that can be attached to an EC2 instance. This case is not covered by the script. Exiting...')
         exit()
@@ -547,6 +549,11 @@ def start_digging_for_secrets(instance_id_secret_searcher, target_ami, region):
 
 def upload_results(instance_id_secret_searcher, target_ami, region):
     log_success(f'Uploading results for AMI {target_ami} to S3 bucket {s3_bucket_name}...')
+    # Print the names of the files in the home/ec2-user/OUTPUT directory that will be uploaded
+    log_success(f'Files to upload: {os.listdir("/home/ec2-user/OUTPUT")}')
+    # Print the size of the files in the home/ec2-user/OUTPUT directory
+    log_success(f'Size of the files to upload: {sum(os.path.getsize(f"/home/ec2-user/OUTPUT/{file}") for file in os.listdir("/home/ec2-user/OUTPUT"))} bytes')
+
 
     ssm = boto3_session.client('ssm', region)
     command = ssm.send_command(InstanceIds=[instance_id_secret_searcher],

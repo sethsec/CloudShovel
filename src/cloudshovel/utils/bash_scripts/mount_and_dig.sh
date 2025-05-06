@@ -51,9 +51,10 @@ collect_system_info() {
     
     # Get list of all files without timestamps but with md5sum
     echo "[x] Collecting file list without timestamps but with md5sum..."
-    find "$mount_point" -maxdepth 7 -type f \( ! -path "$mount_point/proc/*" -a ! -path "$mount_point/sys/*" -a ! -path "$mount_point/usr/share/man/*" -a ! -path "$mount_point/usr/src/*" \) -exec md5sum {} \; 2>/dev/null > "$output_dir/all_files_without_timestamps_md5sum.txt"
-    sed -i "s|$mount_point/|/|" "$output_dir/all_files_without_timestamps_md5sum.txt"    
-
+    # Using -print0 with find and xargs -0 to safely handle filenames with special characters
+    find "$mount_point" -maxdepth 7 -type f \( ! -path "$mount_point/proc/*" -a ! -path "$mount_point/sys/*" -a ! -path "$mount_point/usr/share/man/*" -a ! -path "$mount_point/usr/src/*" \) -print0 | xargs -0 -I{} bash -c 'md5sum "$1" 2>/dev/null || echo "FAILED_MD5SUM $1"' _ {} >> "$output_dir/all_files_without_timestamps_md5sum.txt"
+    sed -i "s|$mount_point/|/|" "$output_dir/all_files_without_timestamps_md5sum.txt"
+    
     # # List files from key directories
     # echo "[x] Listing files from key directories..."
     # find "$mount_point/usr/local/bin" "$mount_point/opt" "$mount_point/etc/cron.d" "$mount_point/etc/cron.daily" "$mount_point/etc/cron.hourly" "$mount_point/etc/cron.weekly" "$mount_point/etc/cron.monthly" "$mount_point/var/spool/cron" "$mount_point/home" "$mount_point/root" -type f 2>/dev/null > "$output_dir/files_from_key_dirs.txt"
