@@ -549,11 +549,6 @@ def start_digging_for_secrets(instance_id_secret_searcher, target_ami, region):
 
 def upload_results(instance_id_secret_searcher, target_ami, region):
     log_success(f'Uploading results for AMI {target_ami} to S3 bucket {s3_bucket_name}...')
-    # Print the names of the files in the home/ec2-user/OUTPUT directory that will be uploaded
-    log_success(f'Files to upload: {os.listdir("/home/ec2-user/OUTPUT")}')
-    # Print the size of the files in the home/ec2-user/OUTPUT directory
-    log_success(f'Size of the files to upload: {sum(os.path.getsize(f"/home/ec2-user/OUTPUT/{file}") for file in os.listdir("/home/ec2-user/OUTPUT"))} bytes')
-
 
     ssm = boto3_session.client('ssm', region)
     command = ssm.send_command(InstanceIds=[instance_id_secret_searcher],

@@ -1,5 +1,15 @@
 #!/bin/bash
 
+# Start logging to file
+mkdir -p /home/ec2-user/OUTPUT
+LOG_FILE="/home/ec2-user/OUTPUT/mount_and_dig.log"
+# Redirect both stdout and stderr to the terminal and the log file
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "[*] Starting mount_and_dig.sh script at $(date)"
+echo "[*] Script version: 1.0"
+echo "[*] Arguments: $@"
+
 if [ $# -lt 1 ]; then
         echo "[*] Usage: $0 <devices>"
         echo "    Multiple devices should be separated by spaces."
@@ -24,14 +34,7 @@ check_and_fix_uuid() {
         # Check if this UUID is already in use
         if grep -q $uuid /etc/fstab || blkid | grep -v $dev | grep -q $uuid; then
             echo "[!] UUID collision detected for $dev"
-            echo "[*] Generating new UUID for $dev"
-            
-            # Generate new UUID
-            xfs_admin -U generate $dev
-            
-            # Get the new UUID
-            new_uuid=$(blkid -s UUID -o value $dev)
-            echo "[*] New UUID for $dev: $new_uuid"
+            echo "[*] Will try to mount with current UUID first"
         fi
     fi
 }
@@ -186,9 +189,15 @@ mount_and_search(){
 
     dev=$1
     echo "[x] Trying to mount $dev"
+    
+    # Get the actual device path (handles /dev/sdf -> /dev/nvme1n1 mapping)
+    actual_dev=$(readlink -f $dev)
+    echo "[x] Actual device path: $actual_dev"
 
     # Check if the filesystem is NTFS
     fs_type=$(blkid -o value -s TYPE $dev)
+    echo "[x] Detected filesystem type: $fs_type"
+    
     if [ "$fs_type" == "ntfs" ]; then
         echo "[x] NTFS filesystem detected. Using ntfs-3g driver."
         mount_point="/mnt/ntfs_$RANDOM"
@@ -207,20 +216,75 @@ mount_and_search(){
 
         mount_point="/mnt/xfs_$RANDOM"
         mkdir -p $mount_point
-        if mount -t xfs $dev $mount_point; then
+        
+        # Try mounting with different options in order of increasing aggression
+        if mount -t xfs $dev $mount_point 2>/dev/null; then
+            echo "[x] Mount successful for $dev at $mount_point"
+        elif mount -t xfs -o nologreplay $dev $mount_point 2>/dev/null; then
+            echo "[x] Mount successful with nologreplay option for $dev at $mount_point"
+        elif mount -t xfs -o rescue $dev $mount_point 2>/dev/null; then
+            echo "[x] Mount successful with rescue option for $dev at $mount_point"
+        else
+            echo "[!] Standard mount options failed for XFS volume $dev"
+            echo "[x] Attempting safe analysis with xfs_repair -n (no modifications)"
+            xfs_repair -n $dev
+
+            echo "[x] Attempting recovery with xfs_repair -L to clear the log"
+            if xfs_repair -L $dev; then
+                echo "[x] Log cleared, trying mount again"
+                if mount -t xfs $dev $mount_point 2>/dev/null; then
+                    echo "[x] Mount successful after log repair for $dev at $mount_point"
+                elif mount -t xfs -o nouuid $dev $mount_point 2>/dev/null; then
+                    echo "[x] Mount successful with nouuid option after log repair for $dev at $mount_point"
+                else
+                    echo "[!] Failed to mount XFS volume $dev even after repairs"
+                    echo "[x] Creating empty directory for placeholder results"
+                    # Create placeholder directories for inspection even though mounting failed
+                    output_dir="/home/ec2-user/OUTPUT/$counter"
+                    mkdir -p "$output_dir"
+                    echo "MOUNT_FAILED_FILESYSTEM_ERRORS" > "$output_dir/mount_failure.txt"
+                    echo "Device: $dev ($actual_dev)" >> "$output_dir/mount_failure.txt"
+                    echo "Filesystem type: $fs_type" >> "$output_dir/mount_failure.txt"
+                    blkid $dev >> "$output_dir/mount_failure.txt"
+                    xfs_info $dev >> "$output_dir/mount_failure.txt" 2>&1
+                    echo "[!] Mount failure logged to $output_dir/mount_failure.txt"
+                    rmdir $mount_point
+                    return 0
+                fi
+            else
+                echo "[!] Failed to repair XFS volume $dev"
+                rmdir $mount_point
+                return 1
+            fi
+        fi
+    elif [ "$fs_type" == "vfat" ]; then
+        echo "[x] FAT filesystem detected."
+        mount_point="/mnt/vfat_$RANDOM"
+        mkdir -p $mount_point
+        if mount -t vfat $dev $mount_point; then
             echo "[x] Mount successful for $dev at $mount_point"
         else
-            echo "[!] Failed to mount XFS volume $dev"
+            echo "[!] Failed to mount FAT volume $dev"
             rmdir $mount_point
             return 1
         fi
     else
-        if udisksctl mount -b $dev ; then
+        # Try udisksctl for other filesystem types
+        if udisksctl mount -b $dev 2>/dev/null; then
             mount_point=$(udisksctl info -b $dev | grep MountPoints | tr -s ' ' | cut -d ' ' -f 3)
             echo "[x] Mount successful for $dev at $mount_point"
         else
-            echo "[!] Failed to mount $dev"
-            return 1
+            echo "[!] Failed to mount $dev with udisksctl, trying direct mount"
+            # Try a direct mount as fallback
+            mount_point="/mnt/auto_$RANDOM"
+            mkdir -p $mount_point
+            if mount $dev $mount_point; then
+                echo "[x] Mount successful for $dev at $mount_point"
+            else
+                echo "[!] All mount attempts failed for $dev"
+                rmdir $mount_point
+                return 1
+            fi
         fi
     fi
 
@@ -232,11 +296,12 @@ mount_and_search(){
     collect_system_info "$output_dir" "$mount_point"
 
     echo "[x] Unmounting $dev"
-    if [ "$fs_type" == "ntfs" ] || [ "$fs_type" == "xfs" ]; then
+    if [ "$fs_type" == "ntfs" ] || [ "$fs_type" == "xfs" ] || [ "$fs_type" == "vfat" ]; then
         umount $mount_point
         rmdir $mount_point
     else
-        udisksctl unmount -b $dev -f
+        udisksctl unmount -b $dev -f || umount $mount_point
+        [ -d "$mount_point" ] && rmdir $mount_point
     fi
 
     return 0
