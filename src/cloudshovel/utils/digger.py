@@ -177,72 +177,85 @@ def get_instance_profile_secret_searcher(region):
         
 
 def wait_for_instance_status(instance_id, desired_status, region):
-    log_success(f'Checking instance status every 2s until the instance has status \'{desired_status}\'')
+    ec2 = boto3_session.client('ec2', region_name=region)  # Ensure region_name is used for client
     
-    ec2 = boto3_session.client('ec2', region)
-    status_reached = False
-    
-    while status_reached == False:
-        instance = ec2.describe_instances(InstanceIds=[instance_id])
-        status_reached = instance['Reservations'][0]['Instances'][0]['State']['Name']  == desired_status
-        
-        if status_reached == False:
-            time.sleep(2)
-    
-    log_success(f'Instance {instance_id} reached the status \'{desired_status}\'')
+    max_not_found_retries = 6 
+    not_found_retry_delay_seconds = 10
+    not_found_attempts = 0
+
+    overall_poll_attempts = 0
+    # Max poll duration: 15 min for 'running', 83 min for 'stopped' (like in stop_instance)
+    # Defaulting to a general 15 mins, can be made more specific if needed by passing max duration
+    max_overall_poll_duration_seconds = 15 * 60 
+    poll_interval_seconds = 5 # Increased poll interval slightly
+
+    log_success(f"Waiting for instance {instance_id} to reach status '{desired_status}' in region {region}. Polling every {poll_interval_seconds}s.")
+
+    start_time = time.time()
+    while True:
+        if (time.time() - start_time) > max_overall_poll_duration_seconds:
+            log_error(f"Timeout: Instance {instance_id} did not reach status '{desired_status}' within {max_overall_poll_duration_seconds // 60} minutes. Last known state unknown or not desired. Aborting wait.")
+            raise Exception(f"Timeout waiting for instance {instance_id} to reach {desired_status}.")
+
+        overall_poll_attempts += 1
+        try:
+            response = ec2.describe_instances(InstanceIds=[instance_id])
+            
+            if not response['Reservations'] or not response['Reservations'][0]['Instances']:
+                log_warning(f"Instance {instance_id} described but no instance data returned. Attempt {not_found_attempts + 1}/{max_not_found_retries}. Retrying in {not_found_retry_delay_seconds}s.")
+                not_found_attempts += 1
+                if not_found_attempts >= max_not_found_retries:
+                    log_error(f"Instance {instance_id} details not found after {max_not_found_retries} attempts (empty response). Aborting wait.")
+                    raise Exception(f"Instance {instance_id} details not found after retries (empty response).")
+                time.sleep(not_found_retry_delay_seconds)
+                continue
+
+            instance_data = response['Reservations'][0]['Instances'][0]
+            current_status = instance_data['State']['Name']
+            # More descriptive logging for each poll attempt might be too verbose, only log on status change or significant events.
+            # log_success(f"Instance {instance_id} current status: {current_status}. Target: '{desired_status}'. Poll attempt: {overall_poll_attempts}.")
 
 
-# def create_secret_searcher(region, instance_profile_arn):
-#     ec2 = boto3_session.client('ec2', region)
+            if current_status == desired_status:
+                log_success(f"Instance {instance_id} successfully reached status '{desired_status}' after ~{int(time.time() - start_time)} seconds.")
+                return # Success
 
-#     # log_success('Checking if a secret searcher is already running in this region...')
-#     # instances = ec2.describe_instances(Filters=[{'Name':'tag-key', 'Values':['usage']},
-#     #                                             {'Name':'tag-value','Values':['SecretSearcher']},
-#     #                                             {'Name':'instance-state-name', 'Values':['pending','running']}])
+            # Check for unexpected terminal states
+            # 'stopped' can be a desired state (e.g. for stop_instance), so it's only unexpected if not the target.
+            unexpected_terminal_states = ['shutting-down', 'terminated']
+            if current_status == 'stopping' and desired_status != 'stopped':
+                 unexpected_terminal_states.append('stopping')
+            if current_status == 'stopped' and desired_status != 'stopped':
+                unexpected_terminal_states.append('stopped')
 
-#     # if len(instances['Reservations']) > 0:
-#     #     instance_id = instances['Reservations'][0]['Instances'][0]['InstanceId']
 
-#     #     log_success(f'Secret searcher found: {instance_id}')
-#     #     log_success(f"Checking and waiting the instance to be in 'running' state")
+            if current_status in unexpected_terminal_states:
+                 log_error(f"Instance {instance_id} entered unexpected terminal state '{current_status}' while waiting for '{desired_status}'. Aborting wait.")
+                 raise Exception(f"Instance {instance_id} in unexpected state {current_status} when waiting for {desired_status}.")
 
-#     #     wait_for_instance_status(instance_id, 'running', region)
+            # Reset not_found_attempts because describe_instances succeeded and returned data this time
+            not_found_attempts = 0 
+            log_success(f"Instance {instance_id} is {current_status}. Waiting for {desired_status}. Polling again in {poll_interval_seconds}s.")
+            time.sleep(poll_interval_seconds)
 
-#     #     log_success(f'Secret searcher is ready and running in this region')
-#     #     return instance_id
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'InvalidInstanceID.NotFound':
+                not_found_attempts += 1
+                log_warning(f"Instance {instance_id} not found (InvalidInstanceID.NotFound). Attempt {not_found_attempts}/{max_not_found_retries}. Retrying in {not_found_retry_delay_seconds}s.")
+                if not_found_attempts >= max_not_found_retries:
+                    log_error(f"Instance {instance_id} still not found (InvalidInstanceID.NotFound) after {max_not_found_retries} attempts. Aborting wait.")
+                    raise 
+                time.sleep(not_found_retry_delay_seconds)
+            elif e.response['Error']['Code'] == 'RequestLimitExceeded':
+                log_warning(f"Request limit exceeded when polling for {instance_id}. Retrying in 15s.")
+                time.sleep(15)
+            else:
+                log_error(f"A non-retryable ClientError occurred for instance {instance_id}: {e}. Aborting wait.")
+                raise 
+        except Exception as e:
+            log_error(f"An unexpected error occurred while waiting for instance {instance_id}: {e}. Aborting wait.")
+            raise
 
-#     log_warning('No secret searcher instance found. Starting creation process...')
-#     log_success('Getting AMI for latest Amazon Linux 202* for current region...')
-
-#     response = ec2.describe_images(Filters=[{'Name':'name','Values':['al202*-ami-202*-x86_64']}],
-#                                      Owners=['amazon'])
-
-#     sorted_images = sorted(
-#             response['Images'],
-#             key=lambda x: datetime.strptime(x['CreationDate'], '%Y-%m-%dT%H:%M:%S.%fZ'),
-#             reverse=True
-#         )
-
-#     amazon_ami_id = sorted_images[0]['ImageId']
-
-#     log_success(f'Creating Secret Searcher instance based on official and most recent Amazon Image AMI {amazon_ami_id}...')
-#     secret_searcher_instance = ec2.run_instances(InstanceType='c5.large',
-#                             Placement={'AvailabilityZone':f'{region}{availability_zone}'},
-#                             IamInstanceProfile ={'Arn':instance_profile_arn},
-#                             ImageId=amazon_ami_id,
-#                             MinCount=1,
-#                             MaxCount=1,
-#                             BlockDeviceMappings=[{'DeviceName':'/dev/xvda', 'Ebs': {'VolumeSize': 50}}],
-#                             TagSpecifications=[{'ResourceType': 'instance', 'Tags':[{'Key': 'usage', 'Value': 'whoAMI-filesystem-scanner', 'Key': 'Name', 'Value': 'whoAMI-filesystem-scanner'}]}],)
-    
-#     instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
-#     log_success(f"Secret Searcher instance {instance_id} created. Waiting for instance to be in 'running' state...")
-    
-#     wait_for_instance_status(instance_id, 'running', region)
-#     log_success('Waiting 1 more min for the instance to start SSM Agent')
-#     time.sleep(60)
-
-#     return instance_id
 
 def create_secret_searcher(region, instance_profile_arn):
     ec2 = boto3_session.client('ec2', region)
@@ -424,7 +437,7 @@ def start_instance_with_target_ami(ami_object, region, is_ena=False, tried_types
                 'ResourceType': 'instance',
                 'Tags': [
                     {'Key': 'usage', 'Value': 'whoAMI-filesystem-duplicator'},
-                    {'Key': 'Name', 'Value': f'whoAMI-filesystem--duplicator-ami-{ami_id}'}
+                    {'Key': 'Name', 'Value': f'whoAMI-filesystem--duplicator-{ami_id}'}
                 ]
             }]
         }
@@ -551,11 +564,27 @@ def upload_results(instance_id_secret_searcher, target_ami, region):
     log_success(f'Uploading results for AMI {target_ami} to S3 bucket {s3_bucket_name}...')
 
     ssm = boto3_session.client('ssm', region)
+    
+    # Rename the combined TSV file to match the AMI ID
     command = ssm.send_command(InstanceIds=[instance_id_secret_searcher],
                         DocumentName='AWS-RunShellScript',
-                        Parameters={'commands':[f'aws --region {s3_bucket_region} s3 sync /home/ec2-user/OUTPUT/ s3://{s3_bucket_name}/{region}/{target_ami}/', 'rm -rf /home/ec2-user/OUTPUT/']})
+                        Parameters={'commands':[
+                            f'cp /home/ec2-user/OUTPUT/ami_files.tsv /home/ec2-user/{target_ami}.tsv'
+                        ]})
     
-    log_success(f'Upload started. Waiting for upload to complete (this might take a while)...')
+    log_success(f'Preparing file for upload. Waiting for completion...')
+    waiter = ssm.get_waiter('command_executed')
+    waiter.wait(CommandId=command['Command']['CommandId'], InstanceId=instance_id_secret_searcher, WaiterConfig={'Delay':5, 'MaxAttempts':60})
+    
+    # Upload the TSV file to the bucket with the tsv/ prefix
+    command = ssm.send_command(InstanceIds=[instance_id_secret_searcher],
+                        DocumentName='AWS-RunShellScript',
+                        Parameters={'commands':[
+                            f'aws --region {s3_bucket_region} s3 cp /home/ec2-user/{target_ami}.tsv s3://{s3_bucket_name}/tsv/{target_ami}.tsv',
+                            'rm -rf /home/ec2-user/OUTPUT/'
+                        ]})
+    
+    log_success(f'Upload started. Waiting for upload to complete...')
     waiter = ssm.get_waiter('command_executed')
     waiter.wait(CommandId=command['Command']['CommandId'], InstanceId=instance_id_secret_searcher, WaiterConfig={'Delay':5, 'MaxAttempts':800})
     log_success(f'Upload completed')
@@ -564,21 +593,46 @@ def upload_results(instance_id_secret_searcher, target_ami, region):
 def delete_volumes(volume_ids, region):
     log_success(f'Starting deleting volumes {volume_ids} procedure...')
     ec2 = boto3_session.client('ec2', region)
+    successfully_detached_volume_ids = []
 
     log_success(f'Detaching volumes {volume_ids}...')
     for volume_id in volume_ids:
-        ec2.detach_volume(VolumeId=volume_id)
-
-    log_success("Waiting volumes to be in 'available' state...")
-
-    waiter = ec2.get_waiter('volume_available')
-    waiter.wait(VolumeIds=volume_ids, WaiterConfig={'Delay':3, 'MaxAttempts':80})
-
-    log_warning(f'Deleting volumes {volume_ids}')
-    for volume_id in volume_ids:
-        ec2.delete_volume(VolumeId=volume_id)
+        try:
+            ec2.detach_volume(VolumeId=volume_id)
+            log_success(f"Detachment initiated for volume {volume_id}.")
+            successfully_detached_volume_ids.append(volume_id)
+        except ClientError as e:
+            # If the volume is already detached or in a state where detach is not possible (e.g., instance terminated)
+            # it might still be possible to delete it. Log error and proceed.
+            log_warning(f"Could not detach volume {volume_id} (may already be detached or instance gone): {e}. Will still attempt deletion.")
+            successfully_detached_volume_ids.append(volume_id) # Add to list to attempt deletion
+        except Exception as e:
+            log_error(f"Error during detach_volume for {volume_id}: {e}. It might not be deleted.")
     
-    log_warning("All volumes were set for deletion. The script doesn't wait for deletion confirmation. Please check manually if everything was deleted.")
+    if not successfully_detached_volume_ids:
+        log_warning("No volumes were successfully detached or marked for deletion attempt. Skipping deletion phase.")
+        return
+
+    log_success(f"Waiting for volumes {successfully_detached_volume_ids} to be in 'available' state...")
+    try:
+        # This waiter will wait for all specified volumes to become available.
+        # If some are already available, it will proceed faster for those.
+        waiter = ec2.get_waiter('volume_available')
+        waiter.wait(VolumeIds=successfully_detached_volume_ids, WaiterConfig={'Delay':5, 'MaxAttempts':36}) # Reduced max attempts (3 min)
+    except Exception as e:
+        # If waiter fails, it could be that some volumes never became available or the call timed out.
+        # Proceed to attempt deletion for all volumes we tried to detach.
+        log_error(f"Error while waiting for volumes {successfully_detached_volume_ids} to become available: {e}. Attempting to delete them anyway.")
+
+    log_warning(f'Deleting volumes: {successfully_detached_volume_ids}')
+    for volume_id in successfully_detached_volume_ids:
+        try:
+            ec2.delete_volume(VolumeId=volume_id)
+            log_success(f"Deletion initiated for volume {volume_id}.")
+        except Exception as e:
+            log_error(f"Error deleting volume {volume_id}: {e}. Please check manually.")
+    
+    log_warning("Volume deletion process completed. The script doesn't wait for full deletion confirmation for each volume. Please check AWS console if necessary.")
 
 
 def cleanup(region, instance_id=None):
@@ -586,24 +640,38 @@ def cleanup(region, instance_id=None):
     ec2 = boto3_session.client('ec2', region)
 
     if instance_id:
-        log_success(f'Deleting EC2 secret searcher instance {instance_id}...')
+        log_success(f'Terminating EC2 secret searcher instance {instance_id}...')
         try:
             ec2.terminate_instances(InstanceIds=[instance_id])
-            log_success(f'Instance {instance_id} terminated')
+            # Consider adding a waiter for termination here if confirmation is critical
+            # waiter = ec2.get_waiter('instance_terminated')
+            # waiter.wait(InstanceIds=[instance_id])
+            log_success(f'Termination initiated for instance {instance_id}')
         except Exception as e:
             log_error(f'Error terminating instance {instance_id}: {str(e)}')
     else:
-        log_success('Deleting EC2 secret searcher instance...')
-        instances = ec2.describe_instances(Filters=[{'Name':'tag-key', 'Values':['usage']},
-                                                {'Name':'tag-value','Values':['SecretSearcher']},
-                                                {'Name':'instance-state-name', 'Values':['pending','running']}])
+        log_warning('No specific instance ID provided for cleanup. Attempting to find and terminate secret searcher instance(s) by tags...')
+        try:
+            instances = ec2.describe_instances(Filters=[{'Name':'tag-key', 'Values':['usage']},
+                                                    {'Name':'tag-value','Values':['whoAMI-filesystem-scanner']}, # CORRECTED TAG
+                                                    {'Name':'instance-state-name', 'Values':['pending','running']}])
 
-        if len(instances['Reservations']) == 0:
-            log_warning('No secret searcher instance found. Continuing with next resource')
-            # should be only one instance, but just to be sure
-            instance_ids = [x['InstanceId'] for x in instances['Reservations'][0]['Instances']]
-            log_success(f'Terminating instances: {instance_ids}')
-            ec2.terminate_instances(InstanceIds=instance_ids)
+            instance_ids_to_terminate = []
+            if instances['Reservations']:
+                for reservation in instances['Reservations']:
+                    for inst in reservation['Instances']:
+                        instance_ids_to_terminate.append(inst['InstanceId'])
+            
+            if instance_ids_to_terminate:
+                log_success(f'Found and terminating instances by tag: {instance_ids_to_terminate}')
+                ec2.terminate_instances(InstanceIds=instance_ids_to_terminate)
+                # Consider adding a waiter for termination here
+                log_success(f'Termination initiated for instances: {instance_ids_to_terminate}')
+            else:
+                log_warning('No running or pending instances found matching the "whoAMI-filesystem-scanner" usage tag.')
+        except Exception as e:
+            log_error(f'Error during tag-based instance cleanup: {str(e)}')
+
 
     # iam = boto3_session.client('iam')
     
@@ -638,52 +706,106 @@ def dig(args, session):
     global boto3_session
     boto3_session = session
     global s3_bucket_name
-    s3_bucket_name = args.bucket
+    if hasattr(args, 'bucket') and args.bucket:
+        s3_bucket_name = args.bucket
+    
     region = args.region
-    searched = False
-    start_scan_time = time.time()
+    
+    # Initialize variables to ensure they are defined for the finally block
+    instance_id_secret_searcher = None
     volume_ids = []
+    target_ami_obj = None # To store the result of get_ami
+    instance_duplicator_details = None # To store result of start_instance_with_target_ami
+    main_operation_success = False
+    scan_start_time_for_logging = time.time() # Initialize early for broader scope if needed
 
     try:
         log_warning("If ran in an EC2 instance, make sure it has the required permissions to execute the tool")
-        target_ami = get_ami(args.ami_id, region)
+        target_ami_obj = get_ami(args.ami_id, region)
+        if not target_ami_obj: # get_ami calls exit() on failure, but as a safeguard
+            log_error("Failed to retrieve AMI details. Aborting.")
+            return # Should not be reached if get_ami exits
 
         instance_profile_arn_secret_searcher = get_instance_profile_secret_searcher(region)
         instance_id_secret_searcher = create_secret_searcher(region, instance_profile_arn_secret_searcher)
-        create_s3_bucket(region)
+        
+        create_s3_bucket(region) # Ensure bucket exists before uploading
         upload_script_to_bucket(scanning_script_name)
 
-        is_windows = 'Platform' in target_ami and target_ami['Platform'] == 'windows'
+        is_windows = 'Platform' in target_ami_obj and target_ami_obj['Platform'].lower() == 'windows'
         if is_windows:
             upload_script_to_bucket(install_ntfs_3g_script_name)
 
         install_searching_tools(instance_id_secret_searcher, region, is_windows)
 
-        instance = start_instance_with_target_ami(target_ami, region)
-        stop_instance([instance['instanceId']], region)
+        instance_duplicator_details = start_instance_with_target_ami(target_ami_obj, region)
+        stop_instance([instance_duplicator_details['instanceId']], region)
 
-        volume_ids = move_volumes_and_terminate_instance(instance['instanceId'], instance_id_secret_searcher, instance['ami'], region)
-        start_scan_time = time.time()
-        start_digging_for_secrets(instance_id_secret_searcher, instance['ami'], region)
+        # This function also terminates the duplicator instance (instance_duplicator_details['instanceId'])
+        volume_ids = move_volumes_and_terminate_instance(instance_duplicator_details['instanceId'], 
+                                                       instance_id_secret_searcher, 
+                                                       instance_duplicator_details['ami'], 
+                                                       region)
         
-        searched = True
-        delete_volumes(volume_ids, region)
+        scan_start_time_for_logging = time.time() # More precise start time for digging duration
+        start_digging_for_secrets(instance_id_secret_searcher, instance_duplicator_details['ami'], region)
+        
+        # If we've gotten this far, primary operations involving volumes are done or started.
+        # Upload results before declaring main success
+        upload_results(instance_id_secret_searcher, instance_duplicator_details['ami'], region)
+        main_operation_success = True
+
     except Exception as e:
-        log_error(f'Exception occurred for ami {target_ami}')
+        # Construct a more reliable ami_id for error logging
+        ami_id_for_error_msg = args.ami_id
+        if target_ami_obj and 'ImageId' in target_ami_obj:
+            ami_id_for_error_msg = target_ami_obj['ImageId']
+        elif instance_duplicator_details and 'ami' in instance_duplicator_details:
+            ami_id_for_error_msg = instance_duplicator_details['ami']
+        
+        log_error(f'An unrecoverable error occurred during operations for AMI {ami_id_for_error_msg}.')
+        log_error(f'Error details: {e}')
+        # No explicit deletion calls here; finally block handles cleanup.
 
-        log_error(f'Error: {e}')
-
-        if searched == False and len(volume_ids) > 0:
-            delete_volumes(volume_ids, region)
-        elif len(volume_ids) > 0:
-            log_error("An error occurred while deleting the volumes. Please check manually what happened.")
-    else:
-        upload_results(instance_id_secret_searcher, instance['ami'], region)
-        log_success(f"Total duration for ami {target_ami['ImageId']}: {int((time.time() - start_scan_time))} seconds")
-        log_success(f'Scan finished. Check results in s3://{s3_bucket_name}')
     finally:
-        cleanup(region, instance_id=instance_id_secret_searcher)
-            
+        log_warning(f"Entering finally block for AMI {args.ami_id}. Attempting resource cleanup.")
+
+        current_ami_id_for_logging = args.ami_id
+        if target_ami_obj and 'ImageId' in target_ami_obj:
+            current_ami_id_for_logging = target_ami_obj['ImageId']
+        elif instance_duplicator_details and 'ami' in instance_duplicator_details:
+             current_ami_id_for_logging = instance_duplicator_details['ami']
+
+        if main_operation_success:
+            # This logging was previously in an 'else' block
+            duration_seconds = int(time.time() - scan_start_time_for_logging)
+            log_success(f"Total duration for AMI {current_ami_id_for_logging} (digging & upload): {duration_seconds} seconds")
+            log_success(f'Scan finished. Check results in s3://{s3_bucket_name}/tsv/')
+        else:
+            log_warning(f"Main operations for AMI {current_ami_id_for_logging} did not complete successfully.")
+
+        # 1. Attempt to delete volumes
+        if volume_ids: # Check if volume_ids list was populated
+            log_warning(f"Attempting to delete volumes in finally block: {volume_ids}")
+            try:
+                delete_volumes(volume_ids, region) # region is from dig's scope
+            except Exception as vol_del_e:
+                log_error(f"Error during delete_volumes in finally block: {vol_del_e}")
+                log_error(f"Volumes {volume_ids} might be orphaned. Please check AWS console.")
+        else:
+            log_warning("No volume IDs were recorded; skipping volume deletion in finally block.")
+
+        # 2. Attempt to cleanup the secret searcher instance
+        # This uses instance_id_secret_searcher if available, otherwise falls back to tag-based cleanup (now corrected)
+        log_warning(f"Attempting to cleanup secret searcher instance in finally block.")
+        try:
+            cleanup(region, instance_id=instance_id_secret_searcher) # Pass ID if we have it, else cleanup uses tags
+        except Exception as cleanup_e:
+            instance_id_msg = instance_id_secret_searcher if instance_id_secret_searcher else "tag-based lookup"
+            log_error(f"Error during cleanup of secret searcher instance ({instance_id_msg}) in finally block: {cleanup_e}")
+            log_error("Secret searcher instance may be orphaned. Please check AWS console.")
+        
+        log_warning(f"Cleanup process in finally block for AMI {args.ami_id} has concluded.")
 
 if __name__ == '__main__':
     dig()
