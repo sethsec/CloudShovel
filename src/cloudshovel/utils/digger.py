@@ -555,7 +555,7 @@ def start_digging_for_secrets(instance_id_secret_searcher, target_ami, region):
     waiter = ssm.get_waiter('command_executed')
     waiter.wait(CommandId=command['Command']['CommandId'],
                 InstanceId=instance_id_secret_searcher,
-                WaiterConfig={'Delay':5, 'MaxAttempts':720})
+                WaiterConfig={'Delay':10, 'MaxAttempts':720})
     
     log_success('Scanning completed')
 
@@ -576,11 +576,14 @@ def upload_results(instance_id_secret_searcher, target_ami, region):
     waiter = ssm.get_waiter('command_executed')
     waiter.wait(CommandId=command['Command']['CommandId'], InstanceId=instance_id_secret_searcher, WaiterConfig={'Delay':5, 'MaxAttempts':60})
     
+    log_success(f'Uploading mount_and_dig.log to S3 bucket {s3_bucket_name}/ami-processing-logs/{target_ami}/mount_and_dig.log')
+    log_success(f'Uploading {target_ami}.tsv to S3 bucket {s3_bucket_name}/tsv/{target_ami}.tsv')
     # Upload the TSV file to the bucket with the tsv/ prefix
     command = ssm.send_command(InstanceIds=[instance_id_secret_searcher],
                         DocumentName='AWS-RunShellScript',
                         Parameters={'commands':[
                             f'aws --region {s3_bucket_region} s3 cp /home/ec2-user/{target_ami}.tsv s3://{s3_bucket_name}/tsv/{target_ami}.tsv',
+                            f'aws --region {s3_bucket_region} s3 cp /home/ec2-user/OUTPUT/mount_and_dig.log s3://{s3_bucket_name}/ami-processing-logs/{target_ami}/mount_and_dig.log',
                             'rm -rf /home/ec2-user/OUTPUT/'
                         ]})
     
