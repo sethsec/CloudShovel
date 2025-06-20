@@ -260,7 +260,7 @@ def wait_for_instance_status(instance_id, desired_status, region):
 def create_secret_searcher(region, instance_profile_arn):
     ec2 = boto3_session.client('ec2', region)
 
-    preferred_instance_types = ['c5.large', 'm5.large', 't3.large']  # try these in order
+    preferred_instance_types = ['c6i.large', 'm6i.large', 'c5.large', 'm5.large', 't3.large']  # try these in order
     use_on_demand_fallback = True  # Set this to False if you only want spot instances
 
     log_warning('No secret searcher instance found. Starting creation process...')
@@ -412,8 +412,8 @@ def start_instance_with_target_ami(ami_object, region, is_ena=False, tried_types
     tried_types = tried_types or []
 
     ARCH_INSTANCE_MAP = {
-        "x86_64": ["c5.large", "t2.medium", "c3.large"],
-        "arm64": ["t4g.small", "c7g.large", "m6g.medium"]
+        "x86_64": ["c6i.large", "m6i.large", "c5.large", "t2.medium", "c3.large"],
+        "arm64": ["c6g.large","t4g.small", "c7g.large", "m6g.medium"]
     }
 
     fallback_types = [t for t in ARCH_INSTANCE_MAP.get(architecture, []) if t not in tried_types]
