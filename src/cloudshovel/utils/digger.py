@@ -705,6 +705,19 @@ def log_warning(message):
 def log_error(message):
     print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} {message}")
 
+def upload_mount_and_dig_log_only(instance_id_secret_searcher, target_ami, region):
+    log_success(f'Uploading mount_and_dig.log for AMI {target_ami} to S3 bucket {s3_bucket_name} (log-only fallback)...')
+    ssm = boto3_session.client('ssm', region)
+    command = ssm.send_command(InstanceIds=[instance_id_secret_searcher],
+                        DocumentName='AWS-RunShellScript',
+                        Parameters={'commands':[
+                            f'aws --region {s3_bucket_region} s3 cp /home/ec2-user/OUTPUT/mount_and_dig.log s3://{s3_bucket_name}/ami-processing-logs/{target_ami}/mount_and_dig.log'
+                        ]})
+    log_success(f'Log upload started. Waiting for upload to complete...')
+    waiter = ssm.get_waiter('command_executed')
+    waiter.wait(CommandId=command['Command']['CommandId'], InstanceId=instance_id_secret_searcher, WaiterConfig={'Delay':5, 'MaxAttempts':60})
+    log_success(f'Log upload completed')
+
 def dig(args, session):
     global boto3_session
     boto3_session = session
@@ -768,7 +781,18 @@ def dig(args, session):
         
         log_error(f'An unrecoverable error occurred during operations for AMI {ami_id_for_error_msg}.')
         log_error(f'Error details: {e}')
-        # No explicit deletion calls here; finally block handles cleanup.
+        # Try to upload the log file even if digging failed
+        if instance_id_secret_searcher and (target_ami_obj or instance_duplicator_details):
+            ami_id_for_log = None
+            if target_ami_obj and 'ImageId' in target_ami_obj:
+                ami_id_for_log = target_ami_obj['ImageId']
+            elif instance_duplicator_details and 'ami' in instance_duplicator_details:
+                ami_id_for_log = instance_duplicator_details['ami']
+            if ami_id_for_log:
+                try:
+                    upload_mount_and_dig_log_only(instance_id_secret_searcher, ami_id_for_log, region)
+                except Exception as log_e:
+                    log_error(f"Failed to upload mount_and_dig.log in error handler: {log_e}")
 
     finally:
         log_warning(f"Entering finally block for AMI {args.ami_id}. Attempting resource cleanup.")
