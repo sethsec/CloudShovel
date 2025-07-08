@@ -476,7 +476,8 @@ def start_instance_with_target_ami(ami_object, region, is_ena=False, tried_types
             }]
         }
 
-    if not is_ena:
+    # Only add NetworkInterfaces when not using VPC configuration (SubnetId)
+    if not is_ena and 'SubnetId' not in instance_params:
         instance_params['NetworkInterfaces'] = [{
             'AssociatePublicIpAddress': False,
             'DeviceIndex': 0
