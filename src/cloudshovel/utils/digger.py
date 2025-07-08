@@ -1,5 +1,6 @@
 import json
 import time
+import os
 from pathlib import Path
 from datetime import datetime
 from botocore.exceptions import ClientError
@@ -426,7 +427,14 @@ def start_instance_with_target_ami(ami_object, region, is_ena=False, tried_types
 
     log_success(f"Attempting to launch {architecture} instance with type {instance_type} for AMI {ami_id}...")
 
-    try:
+    # Get VPC configuration from environment variables
+    vpc_id = os.environ.get('DUPLICATOR_VPC_ID')
+    subnet_ids_str = os.environ.get('DUPLICATOR_SUBNET_IDS')
+    security_group_id = os.environ.get('DUPLICATOR_SECURITY_GROUP_ID')
+    
+    if not all([vpc_id, subnet_ids_str, security_group_id]):
+        log_warning(f"VPC configuration not found for region {region}. Using default VPC.")
+        # Fall back to original behavior
         instance_params = {
             'InstanceType': instance_type,
             'Placement': {'AvailabilityZone': f'{region}{availability_zone}'},
@@ -441,17 +449,44 @@ def start_instance_with_target_ami(ami_object, region, is_ena=False, tried_types
                 ]
             }]
         }
-
-        if not is_ena:
-            instance_params['NetworkInterfaces'] = [{
-                'AssociatePublicIpAddress': False,
-                'DeviceIndex': 0
+    else:
+        # Use isolated VPC configuration
+        subnet_ids = subnet_ids_str.split(',')
+        # Use the first subnet (you could implement round-robin or random selection)
+        subnet_id = subnet_ids[0]
+        
+        log_success(f"Using isolated VPC configuration: VPC {vpc_id}, Subnet {subnet_id}, SG {security_group_id}")
+        
+        instance_params = {
+            'InstanceType': instance_type,
+            'Placement': {'AvailabilityZone': f'{region}{availability_zone}'},
+            'MaxCount': 1,
+            'MinCount': 1,
+            'ImageId': ami_id,
+            'SubnetId': subnet_id,
+            'SecurityGroupIds': [security_group_id],
+            'TagSpecifications': [{
+                'ResourceType': 'instance',
+                'Tags': [
+                    {'Key': 'usage', 'Value': 'whoAMI-filesystem-duplicator'},
+                    {'Key': 'Name', 'Value': f'whoAMI-filesystem--duplicator-{ami_id}'},
+                    {'Key': 'VPC', 'Value': 'isolated-duplicator-vpc'},
+                    {'Key': 'Security', 'Value': 'no-internet-access'}
+                ]
             }]
+        }
 
+    if not is_ena:
+        instance_params['NetworkInterfaces'] = [{
+            'AssociatePublicIpAddress': False,
+            'DeviceIndex': 0
+        }]
+
+    try:
         instance = ec2.run_instances(**instance_params)
 
         instance_id = instance['Instances'][0]['InstanceId']
-        log_success(f"Instance {instance_id} created. Waiting to be in 'running' state...")
+        log_success(f"Instance {instance_id} created in isolated VPC. Waiting to be in 'running' state...")
 
         waiter = ec2.get_waiter('instance_running')
         waiter.wait(InstanceIds=[instance_id], WaiterConfig={'Delay': 5, 'MaxAttempts': 120})
