@@ -27,6 +27,9 @@ def parse_args():
     parser.add_argument("--region", help="AWS Region", default="us-east-1")
 
     parser.add_argument("--bucket", help="S3 Bucket name to upload and download auxiliary scripts (Bucket will be created if doesn't already exist in your account)", required=True)
+    
+    parser.add_argument("--bloom-filter-bucket", help="S3 Bucket name containing the bloom filter file (optional - if not specified, bloom filter processing is skipped)")
+    parser.add_argument("--unique-files-bucket", help="S3 Bucket name to upload unique files that are not found in the bloom filter database (optional - if not specified, bloom filter processing is skipped)")
 
     return parser.parse_args()
 
@@ -45,7 +48,7 @@ def create_boto3_session(args):
             session_kwargs['aws_session_token'] = args.session_token
 
     try:
-        session = boto3.Session()
+        session = boto3.Session(**session_kwargs)
         identity = session.client('sts').get_caller_identity()
         log_warning(f'The script will run using the identity {identity["Arn"]}')
         return session

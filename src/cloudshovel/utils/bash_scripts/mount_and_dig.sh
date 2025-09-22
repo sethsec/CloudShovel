@@ -28,7 +28,7 @@ yum install udisks2 -y
 # Create a single TSV file for all devices with headers
 OUTPUT_DIR="/home/ec2-user/OUTPUT"
 TSV_FILE="${OUTPUT_DIR}/ami_files.tsv"
-echo "hash	relative_path	modified_timestamp" > "$TSV_FILE"
+echo "hash	relative_path	modified_timestamp	full_path" > "$TSV_FILE"
 
 check_and_fix_uuid() {
     local dev=$1
@@ -60,7 +60,7 @@ collect_system_info() {
             # Get relative path (remove mount point prefix)
             rel_path=${file#$mount_point}
             # Write to TSV file
-            echo "$md5	$rel_path	$timestamp" >> "$TSV_FILE"
+            echo "$md5	$rel_path	$timestamp  $file" >> "$TSV_FILE"
         fi
     done
     
@@ -175,14 +175,14 @@ mount_and_search(){
     # Collect system information
     collect_system_info "$mount_point" "$dev"
 
-    echo "[x] Unmounting $dev"
-    if [ "$fs_type" == "ntfs" ] || [ "$fs_type" == "xfs" ] || [ "$fs_type" == "vfat" ]; then
-        umount $mount_point
-        rmdir $mount_point
-    else
-        udisksctl unmount -b $dev -f || umount $mount_point
-        [ -d "$mount_point" ] && rmdir $mount_point
-    fi
+    # echo "[x] Unmounting $dev"
+    # if [ "$fs_type" == "ntfs" ] || [ "$fs_type" == "xfs" ] || [ "$fs_type" == "vfat" ]; then
+    #     umount $mount_point
+    #     rmdir $mount_point
+    # else
+    #     udisksctl unmount -b $dev -f || umount $mount_point
+    #     [ -d "$mount_point" ] && rmdir $mount_point
+    # fi
 
     return 0
 }

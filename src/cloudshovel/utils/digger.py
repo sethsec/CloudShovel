@@ -1,6 +1,9 @@
 import json
 import time
 import os
+import base64
+import tempfile
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from botocore.exceptions import ClientError
@@ -8,7 +11,7 @@ from colorama import init, Fore, Style
 
 availability_zone = 'a'
 secret_searcher_role_name = 'minimal-ssm'
-tags = [{'Key': 'usage', 'Value': 'CloudQuarry', 'Key': 'Name', 'Value': 'whoami-EBS-volume-copy'}]
+tags = [{'Key': 'usage', 'Value': 'CloudQuarry'}, {'Key': 'Name', 'Value': 'whoami-EBS-volume-copy'}]
 devices = ['/dev/sdf',
            '/dev/sdg',
            '/dev/sdh',
@@ -28,6 +31,12 @@ s3_bucket_region = ''
 scanning_script_name = 'mount_and_dig.sh'
 install_ntfs_3g_script_name = 'install_ntfs_3g.sh'
 boto3_session = None
+
+# Add new global variables for bloom filter functionality
+bloom_filter_bucket = ''  # Will be set from args, no default
+bloom_filter_key = 'known-hashes-python.bloom'
+unique_files_bucket = ''  # Will be set from args, no default
+bloom_filter = None
 
 def get_ami(ami_id, region):
     try:
@@ -65,6 +74,8 @@ def get_ami(ami_id, region):
 
 def create_s3_bucket(region):
     log_success(f'Checking if S3 bucket {s3_bucket_name} exists...')
+    log_success(f'Using region: {region}')
+    log_success(f'Session region: {boto3_session.region_name}')
     s3 = boto3_session.client('s3')
     buckets = s3.list_buckets()['Buckets']
 
@@ -76,17 +87,35 @@ def create_s3_bucket(region):
     
     try:
         log_warning('Bucket not found. Creating...')
-        response = s3.create_bucket(Bucket=s3_bucket_name, CreateBucketConfiguration={'LocationConstraint': region})
-        log_success(f'Bucket created: {response["Location"]}')
-        set_bucket_region(s3_bucket_name)
-    except  ClientError as e:
+        # Set the bucket region before creating the bucket
+        global s3_bucket_region
+        s3_bucket_region = region
+        
+        # Handle us-east-1 special case (no LocationConstraint needed)
+        if region == 'us-east-1':
+            response = s3.create_bucket(Bucket=s3_bucket_name)
+        else:
+            response = s3.create_bucket(Bucket=s3_bucket_name, CreateBucketConfiguration={'LocationConstraint': region})
+        
+        log_success(f'Bucket created: {response.get("Location", "us-east-1")}')
+        # s3_bucket_region is already set above, no need to call set_bucket_region
+    except ClientError as e:
         error_code = e.response['Error']['Code']
+        error_message = e.response['Error']['Message']
         if error_code == 'BucketAlreadyExists':
             log_error(f'Bucket {s3_bucket_name} already exists and is owned by somebody else. Please modify the bucket name and run the script again.')
             cleanup(region)
             exit()
         else:
-            log_error('Unknown error occurred. Execution might continue as expected...')
+            log_error(f'Failed to create S3 bucket {s3_bucket_name}: {error_code} - {error_message}')
+            log_error('Cannot continue without the S3 bucket. Exiting...')
+            cleanup(region)
+            exit()
+    except Exception as e:
+        log_error(f'Unexpected error creating S3 bucket {s3_bucket_name}: {str(e)}')
+        log_error('Cannot continue without the S3 bucket. Exiting...')
+        cleanup(region)
+        exit()
 
 
 def set_bucket_region(bucket_name):
@@ -106,7 +135,9 @@ def set_bucket_region(bucket_name):
 
 def upload_script_to_bucket(script_name):
     log_success(f'Uploading script {script_name} to bucket {s3_bucket_name}...')
-    s3 = boto3_session.client('s3', region_name=s3_bucket_region)
+    # Use the region from the session if s3_bucket_region is not set
+    region_to_use = s3_bucket_region if s3_bucket_region else boto3_session.region_name or 'us-east-1'
+    s3 = boto3_session.client('s3', region_name=region_to_use)
 
     base_path = Path(__file__).parent
     
@@ -358,7 +389,7 @@ def install_searching_tools(instance_id, region, is_windows=False):
                                 DocumentName='AWS-RunRemoteScript',
                                 Parameters={
                                     'sourceType': ['S3'],
-                                    'sourceInfo': [f'{{"path":"https://{s3_bucket_name}.s3.{s3_bucket_region}.amazonaws.com/{install_ntfs_3g_script_name}"}}'],
+                                    'sourceInfo': [f'{{"path":"https://{s3_bucket_name}.s3.{s3_bucket_region or "us-east-1"}.amazonaws.com/{install_ntfs_3g_script_name}"}}'],
                                     'commandLine': [f'bash /home/ec2-user/{install_ntfs_3g_script_name}'],
                                     'workingDirectory': ['/home/ec2-user/']
                                     })
@@ -376,7 +407,7 @@ def install_searching_tools(instance_id, region, is_windows=False):
             exit()
 
     log_success(f'Copying {scanning_script_name} from S3 bucket {s3_bucket_name} to Secret Searcher instance {instance_id} using SSM...')
-    bash_command = f"if test -f /home/ec2-user/{scanning_script_name}; then echo '[INFO] Script already present on disk';else aws --region {s3_bucket_region} s3 cp s3://{s3_bucket_name}/{scanning_script_name} /home/ec2-user/{scanning_script_name} && chmod +x /home/ec2-user/{scanning_script_name}; fi"
+    bash_command = f"if test -f /home/ec2-user/{scanning_script_name}; then echo '[INFO] Script already present on disk';else aws --region {s3_bucket_region or 'us-east-1'} s3 cp s3://{s3_bucket_name}/{scanning_script_name} /home/ec2-user/{scanning_script_name} && chmod +x /home/ec2-user/{scanning_script_name}; fi"
     command = ssm.send_command(InstanceIds=[instance_id],
                             DocumentName='AWS-RunShellScript',
                             Parameters={'commands':[bash_command]})
@@ -560,6 +591,22 @@ def move_volumes_and_terminate_instance(instance_id, instance_id_secret_searcher
         log_success(f'Attaching volume {volume_id} as device {device}')
         ec2.attach_volume(Device=device, InstanceId=instance_id_secret_searcher, VolumeId=volume_id)
         
+        # Tag the volume for cleanup purposes
+        try:
+            ec2.create_tags(
+                Resources=[volume_id],
+                Tags=[
+                    {'Key': 'CloudShovel', 'Value': 'true'},
+                    {'Key': 'AMI', 'Value': ami},
+                    {'Key': 'ScannerInstance', 'Value': instance_id_secret_searcher},
+                    {'Key': 'CreatedBy', 'Value': 'CloudShovel-Digger'},
+                    {'Key': 'Purpose', 'Value': 'filesystem-scanning'}
+                ]
+            )
+            log_success(f'Tagged volume {volume_id} for cleanup identification')
+        except Exception as e:
+            log_warning(f'Failed to tag volume {volume_id}: {e}')
+        
         devices.remove(device)
         in_use_devices[device]=ami
 
@@ -618,8 +665,8 @@ def upload_results(instance_id_secret_searcher, target_ami, region):
     command = ssm.send_command(InstanceIds=[instance_id_secret_searcher],
                         DocumentName='AWS-RunShellScript',
                         Parameters={'commands':[
-                            f'aws --region {s3_bucket_region} s3 cp /home/ec2-user/{target_ami}.tsv s3://{s3_bucket_name}/tsv/{target_ami}.tsv',
-                            f'aws --region {s3_bucket_region} s3 cp /home/ec2-user/OUTPUT/mount_and_dig.log s3://{s3_bucket_name}/ami-processing-logs/{target_ami}/mount_and_dig.log',
+                            f'aws --region {s3_bucket_region or "us-east-1"} s3 cp /home/ec2-user/{target_ami}.tsv s3://{s3_bucket_name}/tsv/{target_ami}.tsv',
+                            f'aws --region {s3_bucket_region or "us-east-1"} s3 cp /home/ec2-user/OUTPUT/mount_and_dig.log s3://{s3_bucket_name}/ami-processing-logs/{target_ami}/mount_and_dig.log',
                             'rm -rf /home/ec2-user/OUTPUT/'
                         ]})
     
@@ -747,12 +794,284 @@ def upload_mount_and_dig_log_only(instance_id_secret_searcher, target_ami, regio
     command = ssm.send_command(InstanceIds=[instance_id_secret_searcher],
                         DocumentName='AWS-RunShellScript',
                         Parameters={'commands':[
-                            f'aws --region {s3_bucket_region} s3 cp /home/ec2-user/OUTPUT/mount_and_dig.log s3://{s3_bucket_name}/ami-processing-logs/{target_ami}/mount_and_dig.log'
+                            f'aws --region {s3_bucket_region or "us-east-1"} s3 cp /home/ec2-user/OUTPUT/mount_and_dig.log s3://{s3_bucket_name}/ami-processing-logs/{target_ami}/mount_and_dig.log'
                         ]})
     log_success(f'Log upload started. Waiting for upload to complete...')
     waiter = ssm.get_waiter('command_executed')
     waiter.wait(CommandId=command['Command']['CommandId'], InstanceId=instance_id_secret_searcher, WaiterConfig={'Delay':5, 'MaxAttempts':60})
     log_success(f'Log upload completed')
+
+def download_bloom_filter():
+    """Download and load the bloom filter from S3"""
+    global bloom_filter
+    
+    if not bloom_filter_bucket:
+        log_error('Bloom filter bucket not configured')
+        return False
+    
+    log_success(f'Downloading bloom filter from s3://{bloom_filter_bucket}/{bloom_filter_key}...')
+    
+    try:
+        s3 = boto3_session.client('s3')
+        
+        # Download bloom filter to a temporary file
+        with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as temp_file:
+            s3.download_fileobj(bloom_filter_bucket, bloom_filter_key, temp_file)
+            temp_file.flush()
+            
+            # Read and parse the JSON
+            with open(temp_file.name, 'r') as f:
+                bloom_data = json.load(f)
+            
+            # Clean up temp file
+            os.unlink(temp_file.name)
+        
+        # Create a simple bloom filter implementation
+        # For production, you might want to use a proper bloom filter library
+        bloom_filter = {
+            'capacity': bloom_data['capacity'],
+            'error_rate': bloom_data['error_rate'],
+            'size': bloom_data['size'],
+            'hash_count': bloom_data['hash_count'],
+            'bit_array': bloom_data['bit_array']
+        }
+        
+        log_success(f'Bloom filter loaded successfully. Capacity: {bloom_filter["capacity"]}, Hash count: {bloom_filter["hash_count"]}')
+        return True
+        
+    except Exception as e:
+        log_error(f'Failed to download bloom filter: {e}')
+        return False
+
+def is_hash_unique(file_hash, bloom_data):
+    """Check if file hash is unique (not in bloom filter) using the same hash function as the original bloom filter"""
+    for i in range(bloom_data['hash_count']):
+        # Create hash with iteration suffix
+        hasher = hashlib.sha256()
+        hasher.update(f"{file_hash}_{i}".encode('utf-8'))
+        bit_index = int(hasher.hexdigest(), 16) % bloom_data['size']
+
+        # If any bit is 0, hash is definitely unique
+        if bloom_data['bit_array'][bit_index] != '1':
+            return True  # Process this file
+
+    return False  # Skip - likely already processed (0.01% false positive rate)
+
+def generate_unique_files_processing_script(target_ami, volume_devices):
+    """Generate the Python script for processing unique files"""
+    return f'''
+#!/usr/bin/env python3
+import json
+import hashlib
+import os
+import subprocess
+import tempfile
+import shutil
+from pathlib import Path
+
+def is_hash_unique(file_hash, bloom_data):
+    """Check if file hash is unique (not in bloom filter) using the same hash function as the original bloom filter"""
+    for i in range(bloom_data['hash_count']):
+        # Create hash with iteration suffix
+        hasher = hashlib.sha256()
+        hasher.update(f"{{file_hash}}_{{i}}".encode('utf-8'))
+        bit_index = int(hasher.hexdigest(), 16) % bloom_data['size']
+
+        # If any bit is 0, hash is definitely unique
+        if bloom_data['bit_array'][bit_index] != '1':
+            return True  # Process this file
+
+    return False  # Skip - likely already processed (0.01% false positive rate)
+
+def extract_file(full_path, hash_value, relative_path, extracted_dir):
+    """Extract a file using its full path, preserving directory structure"""
+    if os.path.isfile(full_path):
+        # Create destination path preserving the relative directory structure
+        # Remove leading slash from relative_path to avoid absolute path issues
+        clean_relative_path = relative_path.lstrip('/')
+        extracted_path = os.path.join(extracted_dir, clean_relative_path)
+
+        # Create parent directories if they don't exist
+        os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
+
+        try:
+            shutil.copy2(full_path, extracted_path)
+            return "EXTRACTED"
+        except Exception as e:
+            print(f"Error copying file {{full_path}} to {{extracted_path}}: {{e}}")
+            return "COPY_ERROR"
+    else:
+        return "NOT_FOUND"
+
+def main():
+    tsv_file = "/home/ec2-user/{target_ami}.tsv"
+    bloom_filter_file = "/home/ec2-user/bloom_filter.json"
+    unique_files_tsv = "/home/ec2-user/unique_files_{target_ami}.tsv"
+    extracted_files_dir = "/home/ec2-user/extracted_unique_files_{target_ami}"
+    
+    # Create directories
+    os.makedirs(extracted_files_dir, exist_ok=True)
+    
+    # Initialize unique files TSV with header
+    with open(unique_files_tsv, 'w') as f:
+        f.write("hash\\trelative_path\\tmodified_timestamp\\tfull_path\\textracted\\n")
+    
+    # Read the bloom filter data from file
+    try:
+        with open(bloom_filter_file, 'r') as f:
+            bloom_data = json.load(f)
+        print(f"[*] Bloom filter loaded: capacity={{bloom_data['capacity']}}, hash_count={{bloom_data['hash_count']}}")
+    except Exception as e:
+        print(f"[!] Error loading bloom filter: {{e}}")
+        return
+    
+    # Process TSV file to find unique files
+    print("[*] Analyzing TSV file for unique files...")
+    unique_files = []
+    total_files_processed = 0
+    valid_hashes = 0
+    unique_hashes = 0
+    
+    with open(tsv_file, 'r') as f:
+        lines = f.readlines()
+        print(f"[*] Total lines in TSV file: {{len(lines)}} (including header)")
+        
+        for line in lines[1:]:  # Skip header
+            parts = line.strip().split('\\t')
+            if len(parts) >= 4:
+                hash_value, relative_path, timestamp, full_path = parts[0], parts[1], parts[2], parts[3]
+                total_files_processed += 1
+
+                if hash_value and hash_value != "FAILED_MD5SUM":
+                    valid_hashes += 1
+                    if is_hash_unique(hash_value, bloom_data):
+                        unique_hashes += 1
+                        print(f"[*] Found unique file: {{relative_path}} (hash: {{hash_value}})")
+                        unique_files.append((hash_value, relative_path, timestamp, full_path))
+    
+    print(f"[*] TSV analysis complete: {{total_files_processed}} total files, {{valid_hashes}} valid hashes, {{unique_hashes}} unique hashes")
+    
+    print(f"[*] Found {{len(unique_files)}} unique files")
+    
+    if unique_files:
+        print(f"[*] Processing {{len(unique_files)}} unique files for extraction...")
+        print("[*] Extracting unique files using full paths from TSV...")
+
+        # Extract files directly using full paths from TSV
+        extracted_count = 0
+        failed_count = 0
+
+        for hash_value, relative_path, timestamp, full_path in unique_files:
+            extraction_result = extract_file(full_path, hash_value, relative_path, extracted_files_dir)
+            # Update the unique files list with extraction status
+            with open(unique_files_tsv, 'a') as f:
+                f.write(f"{{hash_value}}\\t{{relative_path}}\\t{{timestamp}}\\t{{full_path}}\\t{{extraction_result}}\\n")
+
+            # Count extraction results
+            if extraction_result == "EXTRACTED":
+                extracted_count += 1
+            elif extraction_result in ["NOT_FOUND", "COPY_ERROR"]:
+                failed_count += 1
+        
+        print(f"[*] Extraction summary: {{extracted_count}} files extracted, {{failed_count}} files failed")
+        
+        # Upload results
+        print("[*] Uploading unique files data to S3...")
+        try:
+            subprocess.run([
+                'aws', '--region', '{s3_bucket_region or "us-east-1"}', 's3', 'cp', 
+                unique_files_tsv, 
+                f's3://{unique_files_bucket}/{target_ami}/unique_files.tsv'
+            ], check=True, timeout=300)
+            print(f"[*] Uploaded unique files TSV to s3://{unique_files_bucket}/{target_ami}/unique_files.tsv")
+        except Exception as e:
+            print(f"[!] Error uploading TSV: {{e}}")
+        
+        # Upload extracted files if any
+        if os.path.exists(extracted_files_dir) and os.listdir(extracted_files_dir):
+            print("[*] Uploading extracted unique files...")
+            try:
+                subprocess.run([
+                    'aws', '--region', '{s3_bucket_region or "us-east-1"}', 's3', 'sync', 
+                    extracted_files_dir, 
+                    f's3://{unique_files_bucket}/{target_ami}/extracted_files/'
+                ], check=True, timeout=600)
+                print(f"[*] Uploaded extracted files to s3://{unique_files_bucket}/{target_ami}/extracted_files/")
+            except Exception as e:
+                print(f"[!] Error uploading extracted files: {{e}}")
+        else:
+            print("[*] No extracted files to upload")
+
+        print("[*] Unique file processing completed")
+    else:
+        print("[*] No unique files found")
+
+    print("[*] Processing completed - no cleanup needed since we used existing mount points")
+
+if __name__ == "__main__":
+    main()
+'''
+
+def execute_unique_files_processing_script(instance_id_secret_searcher, target_ami, region, process_script):
+    """Execute the unique files processing script on the scanner instance"""
+    ssm = boto3_session.client('ssm', region)
+    
+    # Write the script to a temporary file and upload it
+    script_filename = f'process_unique_files_{target_ami}.py'
+    bloom_filter_filename = f'bloom_filter_{target_ami}.json'
+    
+    # Upload the processing script to S3
+    region_to_use = s3_bucket_region if s3_bucket_region else boto3_session.region_name or 'us-east-1'
+    s3 = boto3_session.client('s3', region_name=region_to_use)
+    s3.put_object(Bucket=s3_bucket_name, Body=process_script, Key=script_filename)
+    
+    # Upload the bloom filter data to S3
+    bloom_filter_json = json.dumps(bloom_filter)
+    s3.put_object(Bucket=s3_bucket_name, Body=bloom_filter_json, Key=bloom_filter_filename)
+    
+    # Execute the script on the instance
+    command = ssm.send_command(
+        InstanceIds=[instance_id_secret_searcher],
+        DocumentName='AWS-RunShellScript',
+        Parameters={'commands': [
+            f'aws --region {s3_bucket_region or "us-east-1"} s3 cp s3://{s3_bucket_name}/{script_filename} /home/ec2-user/{script_filename}',
+            f'aws --region {s3_bucket_region or "us-east-1"} s3 cp s3://{s3_bucket_name}/{bloom_filter_filename} /home/ec2-user/bloom_filter.json',
+            f'chmod +x /home/ec2-user/{script_filename}',
+            f'python3 /home/ec2-user/{script_filename}'
+        ]}
+    )
+    
+    log_success(f'Unique file processing started. Waiting for completion...')
+    waiter = ssm.get_waiter('command_executed')
+    waiter.wait(
+        CommandId=command['Command']['CommandId'],
+        InstanceId=instance_id_secret_searcher,
+        WaiterConfig={'Delay': 15, 'MaxAttempts': 180}  # Increased timeout for file extraction
+    )
+    
+    # Get command output
+    output = ssm.get_command_invocation(
+        CommandId=command['Command']['CommandId'],
+        InstanceId=instance_id_secret_searcher
+    )
+    
+    log_success(f'Unique file processing completed with status: {output["Status"]}')
+    
+    
+
+def process_unique_files_with_remount(instance_id_secret_searcher, target_ami, region, volume_devices):
+    """Process TSV file to find unique files, remount volumes, and upload actual files"""
+    if not unique_files_bucket:
+        log_warning('Unique files bucket not configured. Skipping unique file processing.')
+        return
+    
+    log_success(f'Processing unique files for AMI {target_ami}...')
+    
+    # Generate the processing script
+    process_script = generate_unique_files_processing_script(target_ami, volume_devices)
+    
+    # Execute the script
+    execute_unique_files_processing_script(instance_id_secret_searcher, target_ami, region, process_script)
 
 def dig(args, session):
     global boto3_session
@@ -760,6 +1079,13 @@ def dig(args, session):
     global s3_bucket_name
     if hasattr(args, 'bucket') and args.bucket:
         s3_bucket_name = args.bucket
+    
+    # Add bloom filter and unique files bucket configuration
+    global bloom_filter_bucket, unique_files_bucket
+    if hasattr(args, 'bloom_filter_bucket') and args.bloom_filter_bucket:
+        bloom_filter_bucket = args.bloom_filter_bucket
+    if hasattr(args, 'unique_files_bucket') and args.unique_files_bucket:
+        unique_files_bucket = args.unique_files_bucket
     
     region = args.region
     
@@ -777,6 +1103,19 @@ def dig(args, session):
         if not target_ami_obj: # get_ami calls exit() on failure, but as a safeguard
             log_error("Failed to retrieve AMI details. Aborting.")
             return # Should not be reached if get_ami exits
+
+        # Download bloom filter for unique file processing (only if both buckets are specified)
+        if bloom_filter_bucket and unique_files_bucket:
+            if not download_bloom_filter():
+                log_warning('Failed to download bloom filter. Continuing without unique file processing.')
+                unique_files_bucket = None  # Disable unique file processing
+        else:
+            if not bloom_filter_bucket and not unique_files_bucket:
+                log_success('No bloom filter or unique files buckets specified. Skipping bloom filter processing.')
+            elif not bloom_filter_bucket:
+                log_success('No bloom filter bucket specified. Skipping bloom filter processing.')
+            elif not unique_files_bucket:
+                log_success('No unique files bucket specified. Skipping bloom filter processing.')
 
         instance_profile_arn_secret_searcher = get_instance_profile_secret_searcher(region)
         instance_id_secret_searcher = create_secret_searcher(region, instance_profile_arn_secret_searcher)
@@ -805,6 +1144,20 @@ def dig(args, session):
         # If we've gotten this far, primary operations involving volumes are done or started.
         # Upload results before declaring main success
         upload_results(instance_id_secret_searcher, instance_duplicator_details['ami'], region)
+        
+        # Process unique files if configured
+        if unique_files_bucket and bloom_filter:
+            # Get the volume devices that were used for this AMI
+            volume_devices = []
+            for in_use_device in in_use_devices.keys():
+                if instance_duplicator_details['ami'] in in_use_devices[in_use_device]:
+                    volume_devices.append(in_use_device)
+            
+            if volume_devices:
+                process_unique_files_with_remount(instance_id_secret_searcher, instance_duplicator_details['ami'], region, volume_devices)
+            else:
+                log_warning('No volume devices found for unique file processing')
+        
         main_operation_success = True
 
     except Exception as e:
@@ -844,6 +1197,8 @@ def dig(args, session):
             duration_seconds = int(time.time() - scan_start_time_for_logging)
             log_success(f"Total duration for AMI {current_ami_id_for_logging} (digging & upload): {duration_seconds} seconds")
             log_success(f'Scan finished. Check results in s3://{s3_bucket_name}/tsv/')
+            if unique_files_bucket:
+                log_success(f'Check unique files in s3://{unique_files_bucket}/unique-files/')
         else:
             log_warning(f"Main operations for AMI {current_ami_id_for_logging} did not complete successfully.")
 
