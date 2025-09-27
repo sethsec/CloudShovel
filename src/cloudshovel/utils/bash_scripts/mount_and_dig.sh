@@ -60,7 +60,7 @@ collect_system_info() {
             # Get relative path (remove mount point prefix)
             rel_path=${file#$mount_point}
             # Write to TSV file
-            echo "$md5	$rel_path	$timestamp  $file" >> "$TSV_FILE"
+            echo "$md5	$rel_path	$timestamp	$file" >> "$TSV_FILE"
         fi
     done
     
