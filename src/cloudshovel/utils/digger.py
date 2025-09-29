@@ -1,9 +1,6 @@
 import json
 import time
 import os
-import base64
-import tempfile
-import hashlib
 from pathlib import Path
 from datetime import datetime
 from botocore.exceptions import ClientError
@@ -34,10 +31,8 @@ process_unique_files_script_name = 'process_unique_files.py'
 boto3_session = None
 
 # Add new global variables for bloom filter functionality
-bloom_filter_bucket = ''  # Will be set from args, no default
 bloom_filter_key = 'known-hashes-python.bloom'
 unique_files_bucket = ''  # Will be set from args, no default
-bloom_filter = None
 
 def get_ami(ami_id, region):
     try:
@@ -802,61 +797,6 @@ def upload_mount_and_dig_log_only(instance_id_secret_searcher, target_ami, regio
     waiter.wait(CommandId=command['Command']['CommandId'], InstanceId=instance_id_secret_searcher, WaiterConfig={'Delay':5, 'MaxAttempts':60})
     log_success(f'Log upload completed')
 
-def download_bloom_filter():
-    """Download and load the bloom filter from S3"""
-    global bloom_filter
-    
-    if not bloom_filter_bucket:
-        log_error('Bloom filter bucket not configured')
-        return False
-    
-    log_success(f'Downloading bloom filter from s3://{bloom_filter_bucket}/{bloom_filter_key}...')
-    
-    try:
-        s3 = boto3_session.client('s3')
-        
-        # Download bloom filter to a temporary file
-        with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as temp_file:
-            s3.download_fileobj(bloom_filter_bucket, bloom_filter_key, temp_file)
-            temp_file.flush()
-            
-            # Read and parse the JSON
-            with open(temp_file.name, 'r') as f:
-                bloom_data = json.load(f)
-            
-            # Clean up temp file
-            os.unlink(temp_file.name)
-        
-        # Create a simple bloom filter implementation
-        # For production, you might want to use a proper bloom filter library
-        bloom_filter = {
-            'capacity': bloom_data['capacity'],
-            'error_rate': bloom_data['error_rate'],
-            'size': bloom_data['size'],
-            'hash_count': bloom_data['hash_count'],
-            'bit_array': bloom_data['bit_array']
-        }
-        
-        log_success(f'Bloom filter loaded successfully. Capacity: {bloom_filter["capacity"]}, Hash count: {bloom_filter["hash_count"]}')
-        return True
-        
-    except Exception as e:
-        log_error(f'Failed to download bloom filter: {e}')
-        return False
-
-def is_hash_unique(file_hash, bloom_data):
-    """Check if file hash is unique (not in bloom filter) using the same hash function as the original bloom filter"""
-    for i in range(bloom_data['hash_count']):
-        # Create hash with iteration suffix
-        hasher = hashlib.sha256()
-        hasher.update(f"{file_hash}_{i}".encode('utf-8'))
-        bit_index = int(hasher.hexdigest(), 16) % bloom_data['size']
-
-        # If any bit is 0, hash is definitely unique
-        if bloom_data['bit_array'][bit_index] != '1':
-            return True  # Process this file
-
-    return False  # Skip - likely already processed (0.01% false positive rate)
 
 def execute_unique_files_processing_script(instance_id_secret_searcher, target_ami, region):
     """Execute the unique files processing script on the scanner instance"""
@@ -865,13 +805,13 @@ def execute_unique_files_processing_script(instance_id_secret_searcher, target_a
     region_to_use = s3_bucket_region if s3_bucket_region else boto3_session.region_name or 'us-east-1'
 
     # Execute the script on the instance with command-line arguments
-    # The script will download the bloom filter directly from the bloom filter bucket
+    # The script will download the bloom filter directly from the unique files bucket
     command = ssm.send_command(
         InstanceIds=[instance_id_secret_searcher],
         DocumentName='AWS-RunShellScript',
         Parameters={'commands': [
             f'aws --region {region_to_use} s3 cp s3://{s3_bucket_name}/{process_unique_files_script_name} /home/ec2-user/process_unique_files.py',
-            f'aws --region {region_to_use} s3 cp s3://{bloom_filter_bucket}/{bloom_filter_key} /home/ec2-user/bloom_filter.json',
+            f'aws --region {region_to_use} s3 cp s3://{unique_files_bucket}/{bloom_filter_key} /home/ec2-user/bloom_filter.json',
             f'chmod +x /home/ec2-user/process_unique_files.py',
             f'python3 /home/ec2-user/process_unique_files.py --target-ami {target_ami} --unique-files-bucket {unique_files_bucket} --s3-bucket-region {region_to_use}'
         ]}
@@ -913,10 +853,8 @@ def dig(args, session):
     if hasattr(args, 'bucket') and args.bucket:
         s3_bucket_name = args.bucket
     
-    # Add bloom filter and unique files bucket configuration
-    global bloom_filter_bucket, unique_files_bucket
-    if hasattr(args, 'bloom_filter_bucket') and args.bloom_filter_bucket:
-        bloom_filter_bucket = args.bloom_filter_bucket
+    # Add unique files bucket configuration
+    global unique_files_bucket
     if hasattr(args, 'unique_files_bucket') and args.unique_files_bucket:
         unique_files_bucket = args.unique_files_bucket
     
@@ -937,18 +875,11 @@ def dig(args, session):
             log_error("Failed to retrieve AMI details. Aborting.")
             return # Should not be reached if get_ami exits
 
-        # Download bloom filter for unique file processing (only if both buckets are specified)
-        if bloom_filter_bucket and unique_files_bucket:
-            if not download_bloom_filter():
-                log_warning('Failed to download bloom filter. Continuing without unique file processing.')
-                unique_files_bucket = None  # Disable unique file processing
+        # Check if unique files bucket is specified for bloom filter processing
+        if unique_files_bucket:
+            log_success(f'Unique files bucket configured: {unique_files_bucket}. Bloom filter will be downloaded directly by EC2 instance.')
         else:
-            if not bloom_filter_bucket and not unique_files_bucket:
-                log_success('No bloom filter or unique files buckets specified. Skipping bloom filter processing.')
-            elif not bloom_filter_bucket:
-                log_success('No bloom filter bucket specified. Skipping bloom filter processing.')
-            elif not unique_files_bucket:
-                log_success('No unique files bucket specified. Skipping bloom filter processing.')
+            log_success('No unique files bucket specified. Skipping bloom filter processing.')
 
         instance_profile_arn_secret_searcher = get_instance_profile_secret_searcher(region)
         instance_id_secret_searcher = create_secret_searcher(region, instance_profile_arn_secret_searcher)
@@ -957,7 +888,7 @@ def dig(args, session):
         upload_script_to_bucket(scanning_script_name)
 
         # Upload the unique files processing script if bloom filter is configured
-        if bloom_filter_bucket and unique_files_bucket:
+        if unique_files_bucket:
             upload_script_to_bucket(process_unique_files_script_name)
 
         is_windows = 'Platform' in target_ami_obj and target_ami_obj['Platform'].lower() == 'windows'
@@ -983,7 +914,7 @@ def dig(args, session):
         upload_results(instance_id_secret_searcher, instance_duplicator_details['ami'], region)
         
         # Process unique files if configured
-        if unique_files_bucket and bloom_filter:
+        if unique_files_bucket:
             # Get the volume devices that were used for this AMI
             volume_devices = []
             for in_use_device in in_use_devices.keys():

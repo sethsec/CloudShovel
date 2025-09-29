@@ -9,9 +9,11 @@ def parse_args():
 
     print(figlet_format('CloudShovel', font='rectangles'))
 
-    print("Authors:")
+    print("Original Authors:")
     print("\t- Eduard Agavriloae / @saw_your_packet / hacktodef.com")
     print("\t- Matei Josephs / hivehack.tech\n")
+
+    print("This version has been modified by Seth Art to support https://investigator.cloud\n")
 
     # Positional argument for AMI ID (without a flag)
     parser.add_argument("ami_id", help="AWS AMI ID to launch")
@@ -27,9 +29,8 @@ def parse_args():
     parser.add_argument("--region", help="AWS Region", default="us-east-1")
 
     parser.add_argument("--bucket", help="S3 Bucket name to upload and download auxiliary scripts (Bucket will be created if doesn't already exist in your account)", required=True)
-    
-    parser.add_argument("--bloom-filter-bucket", help="S3 Bucket name containing the bloom filter file (optional - if not specified, bloom filter processing is skipped)")
-    parser.add_argument("--unique-files-bucket", help="S3 Bucket name to upload unique files that are not found in the bloom filter database (optional - if not specified, bloom filter processing is skipped)")
+
+    parser.add_argument("--unique-files-bucket", help="S3 Bucket name containing the bloom filter file and to upload unique files that are not found in the bloom filter database (optional - if not specified, bloom filter processing is skipped)")
 
     return parser.parse_args()
 
