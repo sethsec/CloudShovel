@@ -49,7 +49,7 @@ def create_boto3_session(args):
             session_kwargs['aws_session_token'] = args.session_token
 
     try:
-        session = boto3.Session(**session_kwargs)
+        session = boto3.Session()
         identity = session.client('sts').get_caller_identity()
         log_warning(f'The script will run using the identity {identity["Arn"]}')
         return session
