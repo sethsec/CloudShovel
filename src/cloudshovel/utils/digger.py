@@ -6,7 +6,6 @@ from datetime import datetime
 from botocore.exceptions import ClientError
 from colorama import init, Fore, Style
 
-availability_zone = 'a'
 secret_searcher_role_name = 'minimal-ssm'
 tags = [{'Key': 'usage', 'Value': 'CloudQuarry'}, {'Key': 'Name', 'Value': 'whoami-EBS-volume-copy'}]
 devices = ['/dev/sdf',
@@ -289,6 +288,7 @@ def create_secret_searcher(region, instance_profile_arn):
     ec2 = boto3_session.client('ec2', region)
 
     preferred_instance_types = ['c6i.large', 'm6i.large', 'c5.large', 'm5.large', 't3.large']  # try these in order
+    availability_zones = ['a', 'b', 'c', 'd']  # try these AZs in order
     use_on_demand_fallback = True  # Set this to False if you only want spot instances
 
     log_warning('No secret searcher instance found. Starting creation process...')
@@ -308,66 +308,90 @@ def create_secret_searcher(region, instance_profile_arn):
     amazon_ami_id = sorted_images[0]['ImageId']
     log_success(f'Found Amazon Linux AMI {amazon_ami_id}')
 
+    # Try each instance type with each availability zone
     for instance_type in preferred_instance_types:
-        log_success(f'Trying to launch Secret Searcher as spot instance type {instance_type}...')
-        try:
-            instance_params = {
-                'InstanceType': instance_type,
-                'Placement': {'AvailabilityZone': f'{region}{availability_zone}'},
-                'IamInstanceProfile': {'Arn': instance_profile_arn},
-                'ImageId': amazon_ami_id,
-                'MinCount': 1,
-                'MaxCount': 1,
-                'BlockDeviceMappings': [{'DeviceName': '/dev/xvda', 'Ebs': {'VolumeSize': 50}}],
-                'TagSpecifications': [{
-                    'ResourceType': 'instance',
-                    'Tags': [
-                        {'Key': 'usage', 'Value': 'whoAMI-filesystem-scanner'},
-                        {'Key': 'Name', 'Value': 'whoAMI-filesystem-scanner'}
-                    ]
-                }],
-                'InstanceMarketOptions': {
-                    'MarketType': 'spot',
-                    'SpotOptions': {
-                        'SpotInstanceType': 'one-time',
-                        'InstanceInterruptionBehavior': 'terminate'
+        for az_suffix in availability_zones:
+            az = f'{region}{az_suffix}'
+            log_success(f'Trying to launch Secret Searcher as spot instance type {instance_type} in AZ {az}...')
+            try:
+                instance_params = {
+                    'InstanceType': instance_type,
+                    'Placement': {'AvailabilityZone': az},
+                    'IamInstanceProfile': {'Arn': instance_profile_arn},
+                    'ImageId': amazon_ami_id,
+                    'MinCount': 1,
+                    'MaxCount': 1,
+                    'BlockDeviceMappings': [{'DeviceName': '/dev/xvda', 'Ebs': {'VolumeSize': 50}}],
+                    'TagSpecifications': [{
+                        'ResourceType': 'instance',
+                        'Tags': [
+                            {'Key': 'usage', 'Value': 'whoAMI-filesystem-scanner'},
+                            {'Key': 'Name', 'Value': 'whoAMI-filesystem-scanner'}
+                        ]
+                    }],
+                    'InstanceMarketOptions': {
+                        'MarketType': 'spot',
+                        'SpotOptions': {
+                            'SpotInstanceType': 'one-time',
+                            'InstanceInterruptionBehavior': 'terminate'
+                        }
                     }
                 }
-            }
 
-            secret_searcher_instance = ec2.run_instances(**instance_params)
-            instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
+                secret_searcher_instance = ec2.run_instances(**instance_params)
+                instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
 
-            log_success(f"Spot instance {instance_id} created with type {instance_type}. Waiting for it to be in 'running' state...")
-            wait_for_instance_status(instance_id, 'running', region)
+                log_success(f"Spot instance {instance_id} created with type {instance_type} in AZ {az}. Waiting for it to be in 'running' state...")
+                wait_for_instance_status(instance_id, 'running', region)
 
-            log_success('Waiting 1 more min for the instance to start SSM Agent')
-            time.sleep(60)
-            return instance_id
+                log_success('Waiting 1 more min for the instance to start SSM Agent')
+                time.sleep(60)
+                return instance_id
 
-        except Exception as e:
-            log_warning(f"Spot instance launch failed for {instance_type}: {str(e)}")
-            continue
+            except Exception as e:
+                log_warning(f"Spot instance launch failed for {instance_type} in AZ {az}: {str(e)}")
+                continue
 
     if use_on_demand_fallback:
         log_warning('All spot attempts failed. Trying to launch an on-demand instance instead...')
-        try:
-            instance_params.pop('InstanceMarketOptions', None)  # Remove spot market option
-            instance_params['InstanceType'] = 't3.large'  # use a default reliable type
+        # Try on-demand with multiple AZs as well
+        for az_suffix in availability_zones:
+            az = f'{region}{az_suffix}'
+            try:
+                log_success(f'Trying on-demand instance type t3.large in AZ {az}...')
+                instance_params = {
+                    'InstanceType': 't3.large',
+                    'Placement': {'AvailabilityZone': az},
+                    'IamInstanceProfile': {'Arn': instance_profile_arn},
+                    'ImageId': amazon_ami_id,
+                    'MinCount': 1,
+                    'MaxCount': 1,
+                    'BlockDeviceMappings': [{'DeviceName': '/dev/xvda', 'Ebs': {'VolumeSize': 50}}],
+                    'TagSpecifications': [{
+                        'ResourceType': 'instance',
+                        'Tags': [
+                            {'Key': 'usage', 'Value': 'whoAMI-filesystem-scanner'},
+                            {'Key': 'Name', 'Value': 'whoAMI-filesystem-scanner'}
+                        ]
+                    }]
+                }
 
-            secret_searcher_instance = ec2.run_instances(**instance_params)
-            instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
+                secret_searcher_instance = ec2.run_instances(**instance_params)
+                instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
 
-            log_success(f"On-demand instance {instance_id} created. Waiting for it to be in 'running' state...")
-            wait_for_instance_status(instance_id, 'running', region)
+                log_success(f"On-demand instance {instance_id} created in AZ {az}. Waiting for it to be in 'running' state...")
+                wait_for_instance_status(instance_id, 'running', region)
 
-            log_success('Waiting 1 more min for the instance to start SSM Agent')
-            time.sleep(60)
-            return instance_id
+                log_success('Waiting 1 more min for the instance to start SSM Agent')
+                time.sleep(60)
+                return instance_id
 
-        except Exception as e:
-            log_error(f"Failed to launch even on-demand instance: {str(e)}")
-            raise
+            except Exception as e:
+                log_warning(f"On-demand instance launch failed in AZ {az}: {str(e)}")
+                continue
+
+        log_error(f"Failed to launch on-demand instance in any availability zone")
+        raise Exception('Failed to launch Secret Searcher in any availability zone')
 
     else:
         log_error('Failed to launch Secret Searcher with any spot instance type.')
@@ -461,10 +485,9 @@ def start_instance_with_target_ami(ami_object, region, is_ena=False, tried_types
     
     if not all([vpc_id, subnet_ids_str, security_group_id]):
         log_warning(f"VPC configuration not found for region {region}. Using default VPC.")
-        # Fall back to original behavior
+        # Fall back to original behavior - try multiple AZs
         instance_params = {
             'InstanceType': instance_type,
-            'Placement': {'AvailabilityZone': f'{region}{availability_zone}'},
             'MaxCount': 1,
             'MinCount': 1,
             'ImageId': ami_id,
@@ -481,12 +504,11 @@ def start_instance_with_target_ami(ami_object, region, is_ena=False, tried_types
         subnet_ids = subnet_ids_str.split(',')
         # Use the first subnet (you could implement round-robin or random selection)
         subnet_id = subnet_ids[0]
-        
+
         log_success(f"Using isolated VPC configuration: VPC {vpc_id}, Subnet {subnet_id}, SG {security_group_id}")
-        
+
         instance_params = {
             'InstanceType': instance_type,
-            'Placement': {'AvailabilityZone': f'{region}{availability_zone}'},
             'MaxCount': 1,
             'MinCount': 1,
             'ImageId': ami_id,
@@ -580,6 +602,29 @@ def move_volumes_and_terminate_instance(instance_id, instance_id_secret_searcher
     log_success('Instance {instance_id} terminated')
 
     log_success('Moving volumes to secret searching instance...')
+
+    # Verify Secret Searcher instance is still running before attaching volumes
+    try:
+        searcher_state = ec2.describe_instances(InstanceIds=[instance_id_secret_searcher])
+        state = searcher_state['Reservations'][0]['Instances'][0]['State']['Name']
+        if state != 'running':
+            log_error(f'Secret Searcher instance {instance_id_secret_searcher} is in state "{state}", not "running". Cannot attach volumes.')
+            if state in ['stopping', 'stopped', 'shutting-down', 'terminated']:
+                log_error(f'Secret Searcher instance {instance_id_secret_searcher} was terminated or stopped (state: {state}). This may be due to spot interruption.')
+                raise Exception(f'Secret Searcher instance was lost (state: {state}). Likely spot interruption. Manual retry required.')
+            else:
+                log_warning(f'Secret Searcher in state "{state}". Waiting for it to be running...')
+                wait_for_instance_status(instance_id_secret_searcher, 'running', region)
+    except ClientError as e:
+        if 'InvalidInstanceID' in str(e):
+            log_error(f'Secret Searcher instance {instance_id_secret_searcher} no longer exists. Likely terminated by spot interruption.')
+            raise Exception('Secret Searcher instance was terminated. Likely spot interruption. Manual retry required.')
+        else:
+            log_error(f'Failed to verify Secret Searcher instance state: {e}')
+            raise
+    except Exception as e:
+        log_error(f'Unexpected error verifying Secret Searcher state: {e}')
+        raise
 
     for volume_id in volume_ids:
         device = devices[0]
