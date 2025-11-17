@@ -287,9 +287,10 @@ def wait_for_instance_status(instance_id, desired_status, region):
 def create_secret_searcher(region, instance_profile_arn, required_az=None):
     ec2 = boto3_session.client('ec2', region)
 
-    preferred_instance_types = ['c6i.large', 'm6i.large', 'c5.large', 'm5.large', 't3.large']  # try these in order
+    preferred_instance_types = ['c6i.4xlarge', 'c6i.2xlarge']  # try these in order for spot
     availability_zones = ['a', 'b', 'c', 'd']  # try these AZs in order for default VPC
     use_on_demand_fallback = True  # Set this to False if you only want spot instances
+    final_fallback_type = 't3.2xlarge'  # final on-demand fallback if all else fails
 
     log_warning('No secret searcher instance found. Starting creation process...')
     log_success('Getting AMI for latest Amazon Linux 202* for current region...')
@@ -367,13 +368,53 @@ def create_secret_searcher(region, instance_profile_arn, required_az=None):
                 continue
 
     if use_on_demand_fallback:
-        log_warning('All spot attempts failed. Trying to launch an on-demand instance instead...')
-        # Try on-demand with the same AZ(s)
+        log_warning('All spot attempts failed. Trying to launch on-demand instances instead...')
+
+        # Try on-demand for the same preferred instance types
+        for instance_type in preferred_instance_types:
+            for az in azs_to_try:
+                try:
+                    log_success(f'Trying on-demand instance type {instance_type} in AZ {az}...')
+                    instance_params = {
+                        'InstanceType': instance_type,
+                        'IamInstanceProfile': {'Arn': instance_profile_arn},
+                        'ImageId': amazon_ami_id,
+                        'MinCount': 1,
+                        'MaxCount': 1,
+                        'BlockDeviceMappings': [{'DeviceName': '/dev/xvda', 'Ebs': {'VolumeSize': 50}}],
+                        'TagSpecifications': [{
+                            'ResourceType': 'instance',
+                            'Tags': [
+                                {'Key': 'usage', 'Value': 'whoAMI-filesystem-scanner'},
+                                {'Key': 'Name', 'Value': 'whoAMI-filesystem-scanner'}
+                            ]
+                        }]
+                    }
+
+                    # Always use default VPC with AZ placement (never duplicator VPC)
+                    instance_params['Placement'] = {'AvailabilityZone': az}
+
+                    secret_searcher_instance = ec2.run_instances(**instance_params)
+                    instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
+
+                    log_success(f"On-demand instance {instance_id} ({instance_type}) created in AZ {az}. Waiting for it to be in 'running' state...")
+                    wait_for_instance_status(instance_id, 'running', region)
+
+                    log_success('Waiting 1 more min for the instance to start SSM Agent')
+                    time.sleep(60)
+                    return instance_id
+
+                except Exception as e:
+                    log_warning(f"On-demand instance launch failed for {instance_type} in AZ {az}: {str(e)}")
+                    continue
+
+        # Final fallback to t3.2xlarge on-demand
+        log_warning(f'All preferred on-demand types failed. Trying final fallback: {final_fallback_type}...')
         for az in azs_to_try:
             try:
-                log_success(f'Trying on-demand instance type t3.large in AZ {az}...')
+                log_success(f'Trying final fallback on-demand instance type {final_fallback_type} in AZ {az}...')
                 instance_params = {
-                    'InstanceType': 't3.large',
+                    'InstanceType': final_fallback_type,
                     'IamInstanceProfile': {'Arn': instance_profile_arn},
                     'ImageId': amazon_ami_id,
                     'MinCount': 1,
@@ -394,7 +435,7 @@ def create_secret_searcher(region, instance_profile_arn, required_az=None):
                 secret_searcher_instance = ec2.run_instances(**instance_params)
                 instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
 
-                log_success(f"On-demand instance {instance_id} created in AZ {az}. Waiting for it to be in 'running' state...")
+                log_success(f"On-demand fallback instance {instance_id} ({final_fallback_type}) created in AZ {az}. Waiting for it to be in 'running' state...")
                 wait_for_instance_status(instance_id, 'running', region)
 
                 log_success('Waiting 1 more min for the instance to start SSM Agent')
@@ -402,10 +443,10 @@ def create_secret_searcher(region, instance_profile_arn, required_az=None):
                 return instance_id
 
             except Exception as e:
-                log_warning(f"On-demand instance launch failed in AZ {az}: {str(e)}")
+                log_warning(f"Final fallback instance launch failed in AZ {az}: {str(e)}")
                 continue
 
-        log_error(f"Failed to launch on-demand instance in any availability zone")
+        log_error(f"Failed to launch any on-demand instance type in any availability zone")
         raise Exception('Failed to launch Secret Searcher in any availability zone')
 
     else:
@@ -1056,7 +1097,11 @@ def dig(args, session):
         
         scan_start_time_for_logging = time.time() # More precise start time for digging duration
         start_digging_for_secrets(instance_id_secret_searcher, instance_duplicator_details['ami'], region)
-        
+        scan_duration = time.time() - scan_start_time_for_logging
+        scan_minutes = int(scan_duration // 60)
+        scan_seconds = int(scan_duration % 60)
+        log_success(f'File scanning completed in {scan_minutes}m {scan_seconds}s')
+
         # If we've gotten this far, primary operations involving volumes are done or started.
         # Upload results before declaring main success
         upload_results(instance_id_secret_searcher, instance_duplicator_details['ami'], region)

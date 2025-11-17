@@ -47,23 +47,39 @@ check_and_fix_uuid() {
 collect_system_info() {
     local mount_point=$1
     local dev_name=$2
-    
+
+    # Detect number of CPUs for parallel processing
+    NUM_CPUS=$(nproc)
     echo "[x] Collecting file information (hash, path, timestamp) for device $dev_name..."
-    # Find all files (excluding specific directories) and process each one to get hash and timestamp
-    find "$mount_point" -maxdepth 7 -type f \( ! -path "$mount_point/proc/*" -a ! -path "$mount_point/sys/*" -a ! -path "$mount_point/usr/share/man/*" -a ! -path "$mount_point/usr/src/*" \) -print0 | 
-    while IFS= read -r -d '' file; do
+    echo "[x] Using $NUM_CPUS parallel workers for file hashing"
+
+    # Find all files (excluding specific directories) and process each one in parallel to get hash and timestamp
+    # Each worker writes to a temporary file to avoid write conflicts
+    find "$mount_point" -maxdepth 7 -type f \( ! -path "$mount_point/proc/*" -a ! -path "$mount_point/sys/*" -a ! -path "$mount_point/usr/share/man/*" -a ! -path "$mount_point/usr/src/*" \) -print0 |
+    xargs -0 -P "$NUM_CPUS" -I FILE sh -c '
+        file="FILE"
+        mount_point="$1"
+        tsv_file="$2"
+
         # Get MD5 hash
-        md5=$(md5sum "$file" 2>/dev/null | awk '{print $1}' || echo "FAILED_MD5SUM")
+        md5=$(md5sum "$file" 2>/dev/null | awk '\''{print $1}'\'' || echo "FAILED_MD5SUM")
         if [ "$md5" != "FAILED_MD5SUM" ]; then
             # Get modified timestamp in ISO format
             timestamp=$(date -r "$file" -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
             # Get relative path (remove mount point prefix)
             rel_path=${file#$mount_point}
-            # Write to TSV file
-            echo "$md5	$rel_path	$timestamp	$file" >> "$TSV_FILE"
+            # Write to temporary file with unique process ID to avoid write conflicts
+            echo "$md5	$rel_path	$timestamp	$file" >> "${tsv_file}.$$"
         fi
-    done
-    
+    ' sh "$mount_point" "$TSV_FILE"
+
+    # Merge all temporary worker files into the main TSV file
+    echo "[x] Merging results from parallel workers..."
+    if ls "${TSV_FILE}".* 1> /dev/null 2>&1; then
+        cat "${TSV_FILE}".* >> "$TSV_FILE"
+        rm -f "${TSV_FILE}".*
+    fi
+
     echo "[x] Finished collecting file information for device $dev_name."
 }
 
