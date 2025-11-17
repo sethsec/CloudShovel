@@ -284,11 +284,11 @@ def wait_for_instance_status(instance_id, desired_status, region):
             raise
 
 
-def create_secret_searcher(region, instance_profile_arn):
+def create_secret_searcher(region, instance_profile_arn, required_az=None):
     ec2 = boto3_session.client('ec2', region)
 
     preferred_instance_types = ['c6i.large', 'm6i.large', 'c5.large', 'm5.large', 't3.large']  # try these in order
-    availability_zones = ['a', 'b', 'c', 'd']  # try these AZs in order
+    availability_zones = ['a', 'b', 'c', 'd']  # try these AZs in order for default VPC
     use_on_demand_fallback = True  # Set this to False if you only want spot instances
 
     log_warning('No secret searcher instance found. Starting creation process...')
@@ -308,15 +308,26 @@ def create_secret_searcher(region, instance_profile_arn):
     amazon_ami_id = sorted_images[0]['ImageId']
     log_success(f'Found Amazon Linux AMI {amazon_ami_id}')
 
-    # Try each instance type with each availability zone
+    # If a specific AZ is required (to match target volumes), use only that AZ
+    if required_az:
+        log_success(f'Secret Searcher must launch in AZ {required_az} to match target volumes')
+        azs_to_try = [required_az]
+    else:
+        # Try all AZs
+        azs_to_try = [f'{region}{suffix}' for suffix in availability_zones]
+
+    # Secret Searcher ALWAYS uses default VPC (never duplicator VPC)
+    # It needs internet access for SSM, S3, etc.
+    # Only the target AMI instance uses the isolated duplicator VPC
+
+    # Try each instance type with the specified availability zone(s)
     for instance_type in preferred_instance_types:
-        for az_suffix in availability_zones:
-            az = f'{region}{az_suffix}'
+        for az in azs_to_try:
             log_success(f'Trying to launch Secret Searcher as spot instance type {instance_type} in AZ {az}...')
             try:
+                # Base params
                 instance_params = {
                     'InstanceType': instance_type,
-                    'Placement': {'AvailabilityZone': az},
                     'IamInstanceProfile': {'Arn': instance_profile_arn},
                     'ImageId': amazon_ami_id,
                     'MinCount': 1,
@@ -338,6 +349,9 @@ def create_secret_searcher(region, instance_profile_arn):
                     }
                 }
 
+                # Always use default VPC with AZ placement (never duplicator VPC)
+                instance_params['Placement'] = {'AvailabilityZone': az}
+
                 secret_searcher_instance = ec2.run_instances(**instance_params)
                 instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
 
@@ -354,14 +368,12 @@ def create_secret_searcher(region, instance_profile_arn):
 
     if use_on_demand_fallback:
         log_warning('All spot attempts failed. Trying to launch an on-demand instance instead...')
-        # Try on-demand with multiple AZs as well
-        for az_suffix in availability_zones:
-            az = f'{region}{az_suffix}'
+        # Try on-demand with the same AZ(s)
+        for az in azs_to_try:
             try:
                 log_success(f'Trying on-demand instance type t3.large in AZ {az}...')
                 instance_params = {
                     'InstanceType': 't3.large',
-                    'Placement': {'AvailabilityZone': az},
                     'IamInstanceProfile': {'Arn': instance_profile_arn},
                     'ImageId': amazon_ami_id,
                     'MinCount': 1,
@@ -375,6 +387,9 @@ def create_secret_searcher(region, instance_profile_arn):
                         ]
                     }]
                 }
+
+                # Always use default VPC with AZ placement (never duplicator VPC)
+                instance_params['Placement'] = {'AvailabilityZone': az}
 
                 secret_searcher_instance = ec2.run_instances(**instance_params)
                 instance_id = secret_searcher_instance['Instances'][0]['InstanceId']
@@ -485,7 +500,7 @@ def start_instance_with_target_ami(ami_object, region, is_ena=False, tried_types
     
     if not all([vpc_id, subnet_ids_str, security_group_id]):
         log_warning(f"VPC configuration not found for region {region}. Using default VPC.")
-        # Fall back to original behavior - try multiple AZs
+        # Let AWS pick any available AZ - Secret Searcher will launch in same AZ later
         instance_params = {
             'InstanceType': instance_type,
             'MaxCount': 1,
@@ -603,28 +618,45 @@ def move_volumes_and_terminate_instance(instance_id, instance_id_secret_searcher
 
     log_success('Moving volumes to secret searching instance...')
 
-    # Verify Secret Searcher instance is still running before attaching volumes
-    try:
-        searcher_state = ec2.describe_instances(InstanceIds=[instance_id_secret_searcher])
-        state = searcher_state['Reservations'][0]['Instances'][0]['State']['Name']
-        if state != 'running':
-            log_error(f'Secret Searcher instance {instance_id_secret_searcher} is in state "{state}", not "running". Cannot attach volumes.')
-            if state in ['stopping', 'stopped', 'shutting-down', 'terminated']:
-                log_error(f'Secret Searcher instance {instance_id_secret_searcher} was terminated or stopped (state: {state}). This may be due to spot interruption.')
-                raise Exception(f'Secret Searcher instance was lost (state: {state}). Likely spot interruption. Manual retry required.')
+    # Check volume AZ and Secret Searcher AZ to ensure they match
+    if volume_ids:
+        volume_info = ec2.describe_volumes(VolumeIds=[volume_ids[0]])
+        volume_az = volume_info['Volumes'][0]['AvailabilityZone']
+        log_success(f'First volume {volume_ids[0]} is in AZ {volume_az}')
+
+        # Check Secret Searcher AZ
+        try:
+            searcher_info = ec2.describe_instances(InstanceIds=[instance_id_secret_searcher])
+            searcher_state = searcher_info['Reservations'][0]['Instances'][0]['State']['Name']
+            searcher_az = searcher_info['Reservations'][0]['Instances'][0]['Placement']['AvailabilityZone']
+
+            if searcher_state != 'running':
+                log_error(f'Secret Searcher instance {instance_id_secret_searcher} is in state "{searcher_state}", not "running". Cannot attach volumes.')
+                if searcher_state in ['stopping', 'stopped', 'shutting-down', 'terminated']:
+                    log_error(f'Secret Searcher instance {instance_id_secret_searcher} was terminated or stopped (state: {searcher_state}). This may be due to spot interruption.')
+                    raise Exception(f'Secret Searcher instance was lost (state: {searcher_state}). Likely spot interruption. Manual retry required.')
+                else:
+                    log_warning(f'Secret Searcher in state "{searcher_state}". Waiting for it to be running...')
+                    wait_for_instance_status(instance_id_secret_searcher, 'running', region)
+
+            # Check AZ mismatch
+            if searcher_az != volume_az:
+                log_error(f'AZ MISMATCH: Secret Searcher is in {searcher_az} but volume is in {volume_az}')
+                log_error(f'Cannot attach volumes across availability zones.')
+                raise Exception(f'Availability zone mismatch: Secret Searcher in {searcher_az}, volume in {volume_az}. Cannot attach volumes.')
             else:
-                log_warning(f'Secret Searcher in state "{state}". Waiting for it to be running...')
-                wait_for_instance_status(instance_id_secret_searcher, 'running', region)
-    except ClientError as e:
-        if 'InvalidInstanceID' in str(e):
-            log_error(f'Secret Searcher instance {instance_id_secret_searcher} no longer exists. Likely terminated by spot interruption.')
-            raise Exception('Secret Searcher instance was terminated. Likely spot interruption. Manual retry required.')
-        else:
-            log_error(f'Failed to verify Secret Searcher instance state: {e}')
+                log_success(f'AZ match confirmed: Both Secret Searcher and volumes are in {volume_az}')
+
+        except ClientError as e:
+            if 'InvalidInstanceID' in str(e):
+                log_error(f'Secret Searcher instance {instance_id_secret_searcher} no longer exists. Likely terminated by spot interruption.')
+                raise Exception('Secret Searcher instance was terminated. Likely spot interruption. Manual retry required.')
+            else:
+                log_error(f'Failed to verify Secret Searcher instance state: {e}')
+                raise
+        except Exception as e:
+            log_error(f'Unexpected error verifying Secret Searcher state: {e}')
             raise
-    except Exception as e:
-        log_error(f'Unexpected error verifying Secret Searcher state: {e}')
-        raise
 
     for volume_id in volume_ids:
         device = devices[0]
@@ -926,10 +958,59 @@ def dig(args, session):
         else:
             log_success('No unique files bucket specified. Skipping bloom filter processing.')
 
+        # NEW WORKFLOW: Launch target first, detect its AZ, then launch Secret Searcher in same AZ
+        # This ensures they're always in the same AZ regardless of VPC configuration
+
+        # Step 1: Launch and prepare target instance
+        log_success("Step 1: Launching target AMI instance...")
+        instance_duplicator_details = start_instance_with_target_ami(target_ami_obj, region)
+        stop_instance([instance_duplicator_details['instanceId']], region)
+
+        # Step 2: Detach volumes and detect their AZ
+        log_success("Step 2: Detaching volumes and detecting AZ...")
+        ec2 = boto3_session.client('ec2', region)
+        volumes = ec2.describe_volumes(Filters=[{'Name':'attachment.instance-id', 'Values':[instance_duplicator_details['instanceId']]}])
+        volume_ids = [x['VolumeId'] for x in volumes['Volumes']]
+
+        if not volume_ids:
+            raise Exception("No volumes found attached to target instance")
+
+        # Get the AZ from the first volume
+        target_volume_az = volumes['Volumes'][0]['AvailabilityZone']
+        log_success(f"Target instance volumes are in AZ: {target_volume_az}")
+
+        # Detach the volumes
+        for volume_id in volume_ids:
+            log_success(f'Detaching volume {volume_id}...')
+            ec2.detach_volume(VolumeId=volume_id)
+
+        log_success("Waiting for all detached volumes to be in 'available' state...")
+        all_available = False
+        max_wait_time = 300
+        start_time = time.time()
+        while not all_available and (time.time() - start_time) < max_wait_time:
+            volumes_status = ec2.describe_volumes(VolumeIds=volume_ids)
+            all_available = all(vol['State'] == 'available' for vol in volumes_status['Volumes'])
+            if not all_available:
+                time.sleep(5)
+
+        if not all_available:
+            raise Exception("Volumes did not become available in time")
+        log_success("All volumes are in 'available' state")
+
+        # Terminate the target instance
+        log_warning(f'Terminating instance {instance_duplicator_details["instanceId"]} created for target AMI...')
+        ec2.terminate_instances(InstanceIds=[instance_duplicator_details['instanceId']])
+        log_success('Instance terminated')
+
+        # Step 3: Now launch Secret Searcher in the SAME AZ as the volumes
+        log_success(f"Step 3: Launching Secret Searcher in AZ {target_volume_az} to match volumes...")
         instance_profile_arn_secret_searcher = get_instance_profile_secret_searcher(region)
-        instance_id_secret_searcher = create_secret_searcher(region, instance_profile_arn_secret_searcher)
-        
-        create_s3_bucket(region) # Ensure bucket exists before uploading
+        instance_id_secret_searcher = create_secret_searcher(region, instance_profile_arn_secret_searcher, required_az=target_volume_az)
+
+        # Step 4: Prepare Secret Searcher with scripts and tools
+        log_success("Step 4: Preparing Secret Searcher with scanning tools...")
+        create_s3_bucket(region)
         upload_script_to_bucket(scanning_script_name)
 
         # Upload the unique files processing script if bloom filter is configured
@@ -942,14 +1023,36 @@ def dig(args, session):
 
         install_searching_tools(instance_id_secret_searcher, region, is_windows)
 
-        instance_duplicator_details = start_instance_with_target_ami(target_ami_obj, region)
-        stop_instance([instance_duplicator_details['instanceId']], region)
+        # Step 5: Attach volumes to Secret Searcher
+        log_success("Step 5: Attaching volumes to Secret Searcher...")
+        for volume_id in volume_ids:
+            device = devices[0]
+            log_success(f'Attaching volume {volume_id} as device {device}')
+            ec2.attach_volume(Device=device, InstanceId=instance_id_secret_searcher, VolumeId=volume_id)
 
-        # This function also terminates the duplicator instance (instance_duplicator_details['instanceId'])
-        volume_ids = move_volumes_and_terminate_instance(instance_duplicator_details['instanceId'], 
-                                                       instance_id_secret_searcher, 
-                                                       instance_duplicator_details['ami'], 
-                                                       region)
+            # Tag the volume for cleanup purposes
+            try:
+                ec2.create_tags(
+                    Resources=[volume_id],
+                    Tags=[
+                        {'Key': 'CloudShovel', 'Value': 'true'},
+                        {'Key': 'AMI', 'Value': instance_duplicator_details['ami']},
+                        {'Key': 'ScannerInstance', 'Value': instance_id_secret_searcher},
+                        {'Key': 'CreatedBy', 'Value': 'CloudShovel-Digger'},
+                        {'Key': 'Purpose', 'Value': 'filesystem-scanning'}
+                    ]
+                )
+                log_success(f'Tagged volume {volume_id} for cleanup identification')
+            except Exception as e:
+                log_warning(f'Failed to tag volume {volume_id}: {e}')
+
+            devices.remove(device)
+            in_use_devices[device] = instance_duplicator_details['ami']
+
+        log_success("Waiting for volumes to be in 'in-use' state...")
+        waiter = ec2.get_waiter('volume_in_use')
+        waiter.wait(VolumeIds=volume_ids, WaiterConfig={'Delay':3, 'MaxAttempts':60})
+        log_success('Volumes are ready to be searched')
         
         scan_start_time_for_logging = time.time() # More precise start time for digging duration
         start_digging_for_secrets(instance_id_secret_searcher, instance_duplicator_details['ami'], region)
