@@ -284,7 +284,7 @@ def wait_for_instance_status(instance_id, desired_status, region):
             raise
 
 
-def create_secret_searcher(region, instance_profile_arn, required_az=None):
+def create_secret_searcher(region, instance_profile_arn, required_az=None, scanner_os='al2'):
     ec2 = boto3_session.client('ec2', region)
 
     preferred_instance_types = ['c6i.4xlarge', 'c6i.2xlarge']  # try these in order for spot
@@ -293,10 +293,17 @@ def create_secret_searcher(region, instance_profile_arn, required_az=None):
     final_fallback_type = 't3.2xlarge'  # final on-demand fallback if all else fails
 
     log_warning('No secret searcher instance found. Starting creation process...')
-    log_success('Getting AMI for latest Amazon Linux 202* for current region...')
+
+    # Select AMI filter based on scanner OS
+    if scanner_os == 'al2':
+        ami_filter_pattern = 'amzn2-ami-hvm-2.0*-x86_64-gp2'
+        log_success(f'Getting AMI for latest Amazon Linux 2 for current region...')
+    else:  # al2023 (default)
+        ami_filter_pattern = 'al2023-ami-2023*-x86_64'
+        log_success(f'Getting AMI for latest Amazon Linux 2023 for current region...')
 
     response = ec2.describe_images(
-        Filters=[{'Name': 'name', 'Values': ['al202*-ami-202*-x86_64']}],
+        Filters=[{'Name': 'name', 'Values': [ami_filter_pattern]}],
         Owners=['amazon']
     )
 
@@ -1047,7 +1054,8 @@ def dig(args, session):
         # Step 3: Now launch Secret Searcher in the SAME AZ as the volumes
         log_success(f"Step 3: Launching Secret Searcher in AZ {target_volume_az} to match volumes...")
         instance_profile_arn_secret_searcher = get_instance_profile_secret_searcher(region)
-        instance_id_secret_searcher = create_secret_searcher(region, instance_profile_arn_secret_searcher, required_az=target_volume_az)
+        scanner_os = args.scanner_os if hasattr(args, 'scanner_os') else 'al2'  # Default to al2 for backwards compatibility
+        instance_id_secret_searcher = create_secret_searcher(region, instance_profile_arn_secret_searcher, required_az=target_volume_az, scanner_os=scanner_os)
 
         # Step 4: Prepare Secret Searcher with scripts and tools
         log_success("Step 4: Preparing Secret Searcher with scanning tools...")

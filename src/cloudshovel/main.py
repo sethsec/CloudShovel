@@ -32,6 +32,8 @@ def parse_args():
 
     parser.add_argument("--unique-files-bucket", help="S3 Bucket name containing the bloom filter file and to upload unique files that are not found in the bloom filter database (optional - if not specified, bloom filter processing is skipped)")
 
+    parser.add_argument("--scanner-os", choices=['al2', 'al2023'], default='al2', help="Operating system for the scanner instance: 'al2' (Amazon Linux 2, default, better NTFS support) or 'al2023' (Amazon Linux 2023)")
+
     return parser.parse_args()
 
 # Create the create_boto3_session function that first tries to create a session using the environment variables, and only if that fails does it look for the profile and then the args
