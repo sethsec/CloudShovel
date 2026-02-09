@@ -11,15 +11,7 @@ import argparse
 import shutil
 import logging
 import sys
-import urllib.request
 from pathlib import Path
-
-# Import boto3 for Secrets Manager access (Slack webhook)
-try:
-    import boto3
-    BOTO3_AVAILABLE = True
-except ImportError:
-    BOTO3_AVAILABLE = False
 
 def is_hash_unique(file_hash, bloom_data):
     """Check if file hash is unique (not in bloom filter) using the same hash function as the original bloom filter"""
@@ -302,113 +294,6 @@ def setup_logging(log_file):
     logger.addHandler(console_handler)
 
     return logger
-
-def send_slack_alert(ami_id, findings, region, logger):
-    """
-    Send Slack webhook alert for malware findings
-
-    Args:
-        ami_id: The AMI ID that was scanned
-        findings: List of finding dictionaries with severity CRITICAL or HIGH
-        region: AWS region for Secrets Manager
-        logger: Logger instance
-    """
-    if not BOTO3_AVAILABLE:
-        logger.warning("boto3 not available, skipping Slack alert")
-        return False
-
-    try:
-        # Get webhook URL from Secrets Manager
-        secrets_client = boto3.client('secretsmanager', region_name=region)
-        secret_response = secrets_client.get_secret_value(SecretId='slack-webhook-malware-alerts')
-        webhook_data = json.loads(secret_response['SecretString'])
-        webhook_url = webhook_data.get('webhook_url')
-
-        if not webhook_url:
-            logger.error("Slack webhook URL not found in secret")
-            return False
-    except Exception as e:
-        logger.warning(f"Failed to retrieve Slack webhook from Secrets Manager: {e}")
-        return False
-
-    # Count findings by severity
-    critical = [f for f in findings if f.get('severity') == 'CRITICAL']
-    high = [f for f in findings if f.get('severity') == 'HIGH']
-
-    # Build Slack message blocks
-    blocks = [
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": f"Malware Detected in AMI: {ami_id}",
-                "emoji": True
-            }
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*{len(critical)} CRITICAL* | *{len(high)} HIGH* findings detected"
-            }
-        },
-        {"type": "divider"}
-    ]
-
-    # Add top findings (up to 5)
-    for finding in findings[:5]:
-        severity = finding.get('severity', 'UNKNOWN')
-        file_path = finding.get('file_path', 'unknown')
-        yara_rules = [m.get('rule', 'unknown') for m in finding.get('yara_matches', [])]
-        clamav = finding.get('clamav_result', 'None')
-        entropy = finding.get('entropy', 0)
-
-        finding_text = f"*[{severity}]* `{file_path}`\n"
-        if yara_rules:
-            finding_text += f"YARA: {', '.join(yara_rules[:3])}\n"
-        if clamav:
-            finding_text += f"ClamAV: {clamav}\n"
-        if finding.get('severity') == 'MEDIUM':
-            finding_text += f"Entropy: {entropy:.2f}\n"
-
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": finding_text}
-        })
-
-    # Add link to S3
-    if len(findings) > 5:
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"_...and {len(findings) - 5} more findings_"
-            }
-        })
-
-    blocks.append({
-        "type": "section",
-        "text": {
-            "type": "mrkdwn",
-            "text": f"<https://s3.console.aws.amazon.com/s3/buckets/cloud-image-investigator-unique-files?prefix={ami_id}/|View files in S3>"
-        }
-    })
-
-    # Send webhook
-    try:
-        payload = json.dumps({"blocks": blocks}).encode('utf-8')
-        req = urllib.request.Request(
-            webhook_url,
-            data=payload,
-            headers={'Content-Type': 'application/json'}
-        )
-        urllib.request.urlopen(req, timeout=10)
-        logger.info(f"Slack alert sent successfully for {ami_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to send Slack alert: {e}")
-        return False
-
 
 def run_malware_scan(extracted_files_dir, target_ami, unique_files_bucket, s3_bucket_region, output_dir, logger):
     """
@@ -713,10 +598,10 @@ def main():
                 logger
             )
 
-            # Send Slack alert if critical/high findings detected
+            # Log critical/high findings - Slack alerting handled by processor (has Secrets Manager access)
             if critical_high_findings:
                 logger.warning(f"ALERT: {len(critical_high_findings)} CRITICAL/HIGH severity findings detected!")
-                send_slack_alert(target_ami, critical_high_findings, s3_bucket_region, logger)
+                logger.info("Findings uploaded to S3 - processor will send Slack alert")
             else:
                 logger.info("No critical or high severity findings detected")
 

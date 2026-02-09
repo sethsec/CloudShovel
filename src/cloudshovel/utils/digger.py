@@ -27,6 +27,7 @@ s3_bucket_region = ''
 scanning_script_name = 'mount_and_dig.sh'
 install_ntfs_3g_script_name = 'install_ntfs_3g.sh'
 process_unique_files_script_name = 'process_unique_files.py'
+malware_scanner_script_name = 'malware_scanner.py'
 boto3_session = None
 
 # Add new global variables for bloom filter functionality
@@ -465,7 +466,37 @@ def create_secret_searcher(region, instance_profile_arn, required_az=None, scann
 def install_searching_tools(instance_id, region, is_windows=False):
     log_success(f'Installing tools on Secret Searcher instance {instance_id} for searching secrets...')
     ssm = boto3_session.client('ssm', region)
-    
+
+    # Install YARA and ClamAV for malware scanning
+    log_success(f'Installing YARA and ClamAV on instance {instance_id}...')
+    install_commands = [
+        # Detect OS and install accordingly
+        'if command -v yum &> /dev/null; then '
+        '  amazon-linux-extras install epel -y 2>/dev/null || yum install -y epel-release; '
+        '  yum install -y yara clamav clamav-update; '
+        'elif command -v apt-get &> /dev/null; then '
+        '  apt-get update && apt-get install -y yara clamav; '
+        'fi',
+        'pip3 install yara-python || pip install yara-python || true',
+        'freshclam || true',  # Update ClamAV signatures, don't fail if it errors
+        'mkdir -p /opt/yara-rules'
+    ]
+
+    try:
+        command = ssm.send_command(
+            InstanceIds=[instance_id],
+            DocumentName='AWS-RunShellScript',
+            Parameters={'commands': install_commands}
+        )
+        waiter = ssm.get_waiter('command_executed')
+        waiter.wait(CommandId=command['Command']['CommandId'], InstanceId=instance_id,
+                    WaiterConfig={'Delay': 15, 'MaxAttempts': 40})  # ~10 min timeout
+
+        output = ssm.get_command_invocation(CommandId=command['Command']['CommandId'], InstanceId=instance_id)
+        log_success(f'YARA/ClamAV installation finished with status: {output["Status"]}')
+    except Exception as e:
+        log_warning(f'YARA/ClamAV installation encountered an error: {e}. Malware scanning may be limited.')
+
     # Download the script at /home/ec2-user/ and execute it
     if is_windows:
         command = ssm.send_command(InstanceIds=[instance_id],
@@ -931,13 +962,16 @@ def execute_unique_files_processing_script(instance_id_secret_searcher, target_a
 
     # Execute the script on the instance with command-line arguments
     # The script will download the bloom filter directly from the unique files bucket
+    # Also copy malware_scanner.py for malware scanning functionality
     command = ssm.send_command(
         InstanceIds=[instance_id_secret_searcher],
         DocumentName='AWS-RunShellScript',
         Parameters={'commands': [
             f'aws --region {region_to_use} s3 cp s3://{s3_bucket_name}/{process_unique_files_script_name} /home/ec2-user/process_unique_files.py',
+            f'aws --region {region_to_use} s3 cp s3://{s3_bucket_name}/{malware_scanner_script_name} /home/ec2-user/malware_scanner.py',
             f'aws --region {region_to_use} s3 cp s3://{unique_files_bucket}/{bloom_filter_key} /home/ec2-user/bloom_filter.json',
             f'chmod +x /home/ec2-user/process_unique_files.py',
+            f'chmod +x /home/ec2-user/malware_scanner.py',
             f'python3 /home/ec2-user/process_unique_files.py --target-ami {target_ami} --unique-files-bucket {unique_files_bucket} --s3-bucket-region {region_to_use}'
         ]}
     )
@@ -965,11 +999,96 @@ def process_unique_files_with_remount(instance_id_secret_searcher, target_ami, r
     if not unique_files_bucket:
         log_warning('Unique files bucket not configured. Skipping unique file processing.')
         return
-    
+
     log_success(f'Processing unique files for AMI {target_ami}...')
 
     # Execute the standalone script
     execute_unique_files_processing_script(instance_id_secret_searcher, target_ami, region)
+
+
+def check_and_alert_malware_findings(target_ami, region):
+    """
+    Check S3 for malware findings and send Slack alert if critical/high findings detected.
+
+    This function runs on the processor instance (which has Secrets Manager access)
+    after the scanner uploads findings to S3.
+    """
+    import urllib.request
+
+    s3 = boto3_session.client('s3', region_name=region)
+
+    try:
+        # Download findings from S3
+        response = s3.get_object(
+            Bucket=unique_files_bucket,
+            Key=f'{target_ami}/malware_findings.json'
+        )
+        findings_data = json.loads(response['Body'].read().decode('utf-8'))
+    except s3.exceptions.NoSuchKey:
+        log_warning(f'No malware findings file for {target_ami}')
+        return
+    except Exception as e:
+        log_error(f'Error reading malware findings: {e}')
+        return
+
+    # Check for critical/high findings
+    findings = findings_data.get('findings', [])
+    critical_high = [f for f in findings if f.get('severity') in ['CRITICAL', 'HIGH']]
+
+    if not critical_high:
+        log_success(f'No critical/high malware findings for {target_ami}')
+        return
+
+    log_warning(f'ALERT: {len(critical_high)} critical/high findings for {target_ami}!')
+
+    # Get Slack webhook from Secrets Manager
+    try:
+        secrets = boto3_session.client('secretsmanager', region_name=region)
+        webhook_data = json.loads(
+            secrets.get_secret_value(SecretId='slack-webhook-malware-alerts')['SecretString']
+        )
+        webhook_url = webhook_data.get('webhook_url')
+    except Exception as e:
+        log_error(f'Could not get Slack webhook: {e}')
+        return
+
+    # Build and send Slack message
+    critical = [f for f in critical_high if f['severity'] == 'CRITICAL']
+    high = [f for f in critical_high if f['severity'] == 'HIGH']
+
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"Malware Detected: {target_ami}"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{len(critical)} CRITICAL* | *{len(high)} HIGH*"}}
+    ]
+
+    for finding in critical_high[:5]:
+        yara_rules = [m.get('rule', '?') for m in finding.get('yara_matches', [])]
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text":
+                f"*[{finding['severity']}]* `{finding['file_path']}`\n"
+                f"YARA: {yara_rules}\nClamAV: {finding.get('clamav_result', 'None')}"
+            }
+        })
+
+    if len(critical_high) > 5:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"_...and {len(critical_high) - 5} more findings_"}
+        })
+
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": f"<https://s3.console.aws.amazon.com/s3/buckets/{unique_files_bucket}?prefix={target_ami}/|View in S3>"}
+    })
+
+    try:
+        payload = json.dumps({"blocks": blocks}).encode('utf-8')
+        req = urllib.request.Request(webhook_url, data=payload, headers={'Content-Type': 'application/json'})
+        urllib.request.urlopen(req, timeout=10)
+        log_success(f'Slack alert sent for {target_ami}')
+    except Exception as e:
+        log_error(f'Failed to send Slack alert: {e}')
 
 def dig(args, session):
     global boto3_session
@@ -1062,9 +1181,10 @@ def dig(args, session):
         create_s3_bucket(region)
         upload_script_to_bucket(scanning_script_name)
 
-        # Upload the unique files processing script if bloom filter is configured
+        # Upload the unique files processing script and malware scanner if bloom filter is configured
         if unique_files_bucket:
             upload_script_to_bucket(process_unique_files_script_name)
+            upload_script_to_bucket(malware_scanner_script_name)
 
         is_windows = 'Platform' in target_ami_obj and target_ami_obj['Platform'].lower() == 'windows'
         if is_windows:
@@ -1124,6 +1244,8 @@ def dig(args, session):
             
             if volume_devices:
                 process_unique_files_with_remount(instance_id_secret_searcher, instance_duplicator_details['ami'], region, volume_devices)
+                # Check for malware findings and send Slack alert if needed (processor has Secrets Manager access)
+                check_and_alert_malware_findings(instance_duplicator_details['ami'], region)
             else:
                 log_warning('No volume devices found for unique file processing')
         
