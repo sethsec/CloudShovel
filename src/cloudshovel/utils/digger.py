@@ -470,14 +470,15 @@ def install_searching_tools(instance_id, region, is_windows=False):
     # Install YARA and ClamAV for malware scanning
     log_success(f'Installing YARA and ClamAV on instance {instance_id}...')
     install_commands = [
-        # Detect OS and install accordingly
+        # Detect OS and install accordingly - need devel packages for yara-python compilation
         'if command -v yum &> /dev/null; then '
         '  amazon-linux-extras install epel -y 2>/dev/null || yum install -y epel-release; '
-        '  yum install -y yara clamav clamav-update; '
+        '  yum install -y yara yara-devel clamav clamav-update gcc python3-devel; '
         'elif command -v apt-get &> /dev/null; then '
-        '  apt-get update && apt-get install -y yara clamav; '
+        '  apt-get update && apt-get install -y yara libyara-dev clamav gcc python3-dev; '
         'fi',
-        'pip3 install yara-python || pip install yara-python || true',
+        # Install yara-python - needs devel headers installed first
+        'pip3 install yara-python || pip install yara-python',
         'freshclam || true',  # Update ClamAV signatures, don't fail if it errors
         'mkdir -p /opt/yara-rules'
     ]
