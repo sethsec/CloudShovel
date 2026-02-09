@@ -11,7 +11,15 @@ import argparse
 import shutil
 import logging
 import sys
+import urllib.request
 from pathlib import Path
+
+# Import boto3 for Secrets Manager access (Slack webhook)
+try:
+    import boto3
+    BOTO3_AVAILABLE = True
+except ImportError:
+    BOTO3_AVAILABLE = False
 
 def is_hash_unique(file_hash, bloom_data):
     """Check if file hash is unique (not in bloom filter) using the same hash function as the original bloom filter"""
@@ -295,6 +303,208 @@ def setup_logging(log_file):
 
     return logger
 
+def send_slack_alert(ami_id, findings, region, logger):
+    """
+    Send Slack webhook alert for malware findings
+
+    Args:
+        ami_id: The AMI ID that was scanned
+        findings: List of finding dictionaries with severity CRITICAL or HIGH
+        region: AWS region for Secrets Manager
+        logger: Logger instance
+    """
+    if not BOTO3_AVAILABLE:
+        logger.warning("boto3 not available, skipping Slack alert")
+        return False
+
+    try:
+        # Get webhook URL from Secrets Manager
+        secrets_client = boto3.client('secretsmanager', region_name=region)
+        secret_response = secrets_client.get_secret_value(SecretId='slack-webhook-malware-alerts')
+        webhook_data = json.loads(secret_response['SecretString'])
+        webhook_url = webhook_data.get('webhook_url')
+
+        if not webhook_url:
+            logger.error("Slack webhook URL not found in secret")
+            return False
+    except Exception as e:
+        logger.warning(f"Failed to retrieve Slack webhook from Secrets Manager: {e}")
+        return False
+
+    # Count findings by severity
+    critical = [f for f in findings if f.get('severity') == 'CRITICAL']
+    high = [f for f in findings if f.get('severity') == 'HIGH']
+
+    # Build Slack message blocks
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"Malware Detected in AMI: {ami_id}",
+                "emoji": True
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{len(critical)} CRITICAL* | *{len(high)} HIGH* findings detected"
+            }
+        },
+        {"type": "divider"}
+    ]
+
+    # Add top findings (up to 5)
+    for finding in findings[:5]:
+        severity = finding.get('severity', 'UNKNOWN')
+        file_path = finding.get('file_path', 'unknown')
+        yara_rules = [m.get('rule', 'unknown') for m in finding.get('yara_matches', [])]
+        clamav = finding.get('clamav_result', 'None')
+        entropy = finding.get('entropy', 0)
+
+        finding_text = f"*[{severity}]* `{file_path}`\n"
+        if yara_rules:
+            finding_text += f"YARA: {', '.join(yara_rules[:3])}\n"
+        if clamav:
+            finding_text += f"ClamAV: {clamav}\n"
+        if finding.get('severity') == 'MEDIUM':
+            finding_text += f"Entropy: {entropy:.2f}\n"
+
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": finding_text}
+        })
+
+    # Add link to S3
+    if len(findings) > 5:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"_...and {len(findings) - 5} more findings_"
+            }
+        })
+
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"<https://s3.console.aws.amazon.com/s3/buckets/cloud-image-investigator-unique-files?prefix={ami_id}/|View files in S3>"
+        }
+    })
+
+    # Send webhook
+    try:
+        payload = json.dumps({"blocks": blocks}).encode('utf-8')
+        req = urllib.request.Request(
+            webhook_url,
+            data=payload,
+            headers={'Content-Type': 'application/json'}
+        )
+        urllib.request.urlopen(req, timeout=10)
+        logger.info(f"Slack alert sent successfully for {ami_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send Slack alert: {e}")
+        return False
+
+
+def run_malware_scan(extracted_files_dir, target_ami, unique_files_bucket, s3_bucket_region, output_dir, logger):
+    """
+    Run malware scanner on extracted files and upload results
+
+    Args:
+        extracted_files_dir: Directory containing extracted unique files
+        target_ami: AMI ID being scanned
+        unique_files_bucket: S3 bucket for results
+        s3_bucket_region: AWS region
+        output_dir: Output directory for findings file
+        logger: Logger instance
+
+    Returns:
+        Tuple of (findings_list, critical_high_findings)
+    """
+    findings_file = f"{output_dir}/malware_findings_{target_ami}.json"
+    scan_log_file = f"{output_dir}/malware_scan_{target_ami}.log"
+
+    # Download YARA rules from the same bucket we upload to
+    logger.info("Downloading YARA rules from S3...")
+    try:
+        subprocess.run([
+            'aws', '--region', s3_bucket_region, 's3', 'sync',
+            f's3://{unique_files_bucket}/yara-rules/',
+            '/opt/yara-rules/',
+            '--exclude', '*.md',
+            '--exclude', '*.txt'
+        ], check=True, timeout=300, capture_output=True)
+        logger.info("YARA rules downloaded successfully")
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Failed to download YARA rules: {e.stderr if e.stderr else 'unknown error'}")
+        logger.info("Continuing with local rules if available...")
+    except subprocess.TimeoutExpired:
+        logger.warning("Timeout downloading YARA rules, continuing with local rules")
+
+    # Import and run the malware scanner
+    try:
+        # Add the script directory to path for import
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        if script_dir not in sys.path:
+            sys.path.insert(0, script_dir)
+
+        from malware_scanner import scan_directory, compile_yara_rules, setup_logging as scanner_setup_logging
+
+        # Setup scanner logging
+        scanner_logger = scanner_setup_logging(scan_log_file)
+
+        # Compile YARA rules
+        logger.info("Compiling YARA rules...")
+        rules = compile_yara_rules('/opt/yara-rules', scanner_logger)
+
+        # Run the scan
+        logger.info(f"Running malware scan on {extracted_files_dir}...")
+        findings = scan_directory(extracted_files_dir, rules, findings_file, scanner_logger)
+
+        logger.info(f"Malware scan complete: {len(findings)} findings")
+
+    except ImportError as e:
+        logger.error(f"Failed to import malware_scanner: {e}")
+        logger.info("Malware scanner not available, skipping scan")
+        return [], []
+    except Exception as e:
+        logger.error(f"Error running malware scan: {e}")
+        return [], []
+
+    # Upload findings to S3
+    if os.path.exists(findings_file):
+        logger.info("Uploading malware findings to S3...")
+        try:
+            subprocess.run([
+                'aws', '--region', s3_bucket_region, 's3', 'cp',
+                findings_file,
+                f's3://{unique_files_bucket}/{target_ami}/malware_findings.json'
+            ], check=True, timeout=120)
+            logger.info(f"Uploaded malware findings to s3://{unique_files_bucket}/{target_ami}/malware_findings.json")
+        except Exception as e:
+            logger.error(f"Error uploading malware findings: {e}")
+
+    # Upload scan log to S3
+    if os.path.exists(scan_log_file):
+        try:
+            subprocess.run([
+                'aws', '--region', s3_bucket_region, 's3', 'cp',
+                scan_log_file,
+                f's3://{unique_files_bucket}/{target_ami}/malware_scan.log'
+            ], check=True, timeout=120)
+        except Exception as e:
+            logger.warning(f"Error uploading scan log: {e}")
+
+    # Filter for critical/high findings
+    critical_high = [f for f in findings if f.get('severity') in ['CRITICAL', 'HIGH']]
+
+    return findings, critical_high
+
+
 def parse_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Process unique files from bloom filter analysis')
@@ -304,6 +514,7 @@ def parse_arguments():
     parser.add_argument('--bloom-filter-file', default='/home/ec2-user/bloom_filter.json', help='Path to bloom filter JSON file')
     parser.add_argument('--tsv-file', help='Path to TSV file (defaults to /home/ec2-user/{target-ami}.tsv)')
     parser.add_argument('--output-dir', default='/home/ec2-user', help='Output directory (default: /home/ec2-user)')
+    parser.add_argument('--skip-malware-scan', action='store_true', help='Skip malware scanning (for testing)')
 
     return parser.parse_args()
 
@@ -485,6 +696,33 @@ def main():
                 logger.info("No extracted files found in directory")
         else:
             logger.error(f"Extraction directory does not exist: {extracted_files_dir}")
+
+        # Run malware scan on extracted files
+        if extracted_count > 0 and not args.skip_malware_scan:
+            logger.info("")
+            logger.info("=" * 60)
+            logger.info("MALWARE SCANNING")
+            logger.info("=" * 60)
+
+            all_findings, critical_high_findings = run_malware_scan(
+                extracted_files_dir,
+                target_ami,
+                unique_files_bucket,
+                s3_bucket_region,
+                args.output_dir,
+                logger
+            )
+
+            # Send Slack alert if critical/high findings detected
+            if critical_high_findings:
+                logger.warning(f"ALERT: {len(critical_high_findings)} CRITICAL/HIGH severity findings detected!")
+                send_slack_alert(target_ami, critical_high_findings, s3_bucket_region, logger)
+            else:
+                logger.info("No critical or high severity findings detected")
+
+            logger.info("=" * 60)
+        elif args.skip_malware_scan:
+            logger.info("Malware scanning skipped (--skip-malware-scan flag)")
 
         logger.info("Unique file processing completed")
     else:
