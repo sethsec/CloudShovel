@@ -57,3 +57,11 @@ src/testTestingRootWkspc/coverageWorkspace/.coverage
 /cloudshovel.egg-info
 /src/cloudshovel.egg-info
 /build
+
+# Local dev files
+CLAUDE.md
+*.code-workspace
+
+
+malware*
+static-analysis.datadog.yml
