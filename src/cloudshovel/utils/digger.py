@@ -500,26 +500,31 @@ def install_searching_tools(instance_id, region, is_windows=False):
     except Exception as e:
         log_warning(f'YARA/ClamAV installation encountered an error: {e}. Malware scanning may be limited.')
 
-    # Download the script at /home/ec2-user/ and execute it
+    # Download and execute NTFS support script for Windows AMIs
     if is_windows:
-        command = ssm.send_command(InstanceIds=[instance_id],
-                                DocumentName='AWS-RunRemoteScript',
-                                Parameters={
-                                    'sourceType': ['S3'],
-                                    'sourceInfo': [f'{{"path":"https://{s3_bucket_name}.s3.{s3_bucket_region or "us-east-1"}.amazonaws.com/{install_ntfs_3g_script_name}"}}'],
-                                    'commandLine': [f'bash /home/ec2-user/{install_ntfs_3g_script_name}'],
-                                    'workingDirectory': ['/home/ec2-user/']
-                                    })
-        
-        log_success('Installation started. Waiting for completion...')
+        log_success(f'Installing NTFS support for Windows AMI scanning...')
+        region_to_use = s3_bucket_region if s3_bucket_region else 'us-east-1'
+        command = ssm.send_command(
+            InstanceIds=[instance_id],
+            DocumentName='AWS-RunShellScript',
+            Parameters={'commands': [
+                f'aws --region {region_to_use} s3 cp s3://{s3_bucket_name}/{install_ntfs_3g_script_name} /home/ec2-user/{install_ntfs_3g_script_name}',
+                f'chmod +x /home/ec2-user/{install_ntfs_3g_script_name}',
+                f'bash /home/ec2-user/{install_ntfs_3g_script_name}'
+            ]}
+        )
+
+        log_success('NTFS installation started. Waiting for completion...')
         waiter = ssm.get_waiter('command_executed')
         waiter.wait(CommandId=command['Command']['CommandId'], InstanceId=instance_id, WaiterConfig={'Delay':15, 'MaxAttempts':60})
 
         output = ssm.get_command_invocation(CommandId=command['Command']['CommandId'], InstanceId=instance_id)
-        log_success(f'Command execution finished with status: {output["Status"]}')
+        log_success(f'NTFS installation finished with status: {output["Status"]}')
 
         if output['Status'] != 'Success':
-            log_error(f'Installation failed. Please check what went wrong or install it manually and disable this step. Exiting...')
+            log_error(f'NTFS installation failed. Check SSM command output for details.')
+            log_error(f'StdOut: {output.get("StandardOutputContent", "N/A")[:500]}')
+            log_error(f'StdErr: {output.get("StandardErrorContent", "N/A")[:500]}')
             cleanup(region, instance_id=instance_id)
             exit()
 
@@ -1044,9 +1049,9 @@ def check_and_alert_malware_findings(target_ami, region):
 
     log_warning(f'ALERT: {len(critical_high)} critical/high findings for {target_ami}!')
 
-    # Get Slack webhook from Secrets Manager
+    # Get Slack webhook from Secrets Manager (secret is in us-west-2)
     try:
-        secrets = boto3_session.client('secretsmanager', region_name=region)
+        secrets = boto3_session.client('secretsmanager', region_name='us-west-2')
         webhook_data = json.loads(
             secrets.get_secret_value(SecretId='slack-webhook-malware-alerts')['SecretString']
         )
