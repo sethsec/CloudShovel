@@ -7,7 +7,7 @@ from botocore.exceptions import ClientError
 from colorama import init, Fore, Style
 
 secret_searcher_role_name = 'minimal-ssm'
-tags = [{'Key': 'usage', 'Value': 'CloudQuarry'}, {'Key': 'Name', 'Value': 'whoami-EBS-volume-copy'}]
+tags = [{'Key': 'usage', 'Value': 'CloudQuarry'}, {'Key': 'Name', 'Value': 'whoami-EBS-volume-copy'}, {'Key': 'Application', 'Value': 'cloud-image-investigator'}, {'Key': 'Owner', 'Value': 'Seth Art'}]
 devices = ['/dev/sdf',
            '/dev/sdg',
            '/dev/sdh',
@@ -94,6 +94,21 @@ def create_s3_bucket(region):
             response = s3.create_bucket(Bucket=s3_bucket_name, CreateBucketConfiguration={'LocationConstraint': region})
         
         log_success(f'Bucket created: {response.get("Location", "us-east-1")}')
+        # Tag the bucket
+        try:
+            s3.put_bucket_tagging(
+                Bucket=s3_bucket_name,
+                Tagging={
+                    'TagSet': [
+                        {'Key': 'Name', 'Value': s3_bucket_name},
+                        {'Key': 'Application', 'Value': 'cloud-image-investigator'},
+                        {'Key': 'Owner', 'Value': 'Seth Art'}
+                    ]
+                }
+            )
+            log_success(f'Tagged bucket {s3_bucket_name}')
+        except Exception as tag_err:
+            log_warning(f'Failed to tag bucket {s3_bucket_name}: {tag_err}')
         # s3_bucket_region is already set above, no need to call set_bucket_region
     except ClientError as e:
         error_code = e.response['Error']['Code']
@@ -346,7 +361,9 @@ def create_secret_searcher(region, instance_profile_arn, required_az=None, scann
                         'ResourceType': 'instance',
                         'Tags': [
                             {'Key': 'usage', 'Value': 'whoAMI-filesystem-scanner'},
-                            {'Key': 'Name', 'Value': 'whoAMI-filesystem-scanner'}
+                            {'Key': 'Name', 'Value': 'whoAMI-filesystem-scanner'},
+                            {'Key': 'Application', 'Value': 'cloud-image-investigator'},
+                            {'Key': 'Owner', 'Value': 'Seth Art'}
                         ]
                     }],
                     'InstanceMarketOptions': {
@@ -394,7 +411,9 @@ def create_secret_searcher(region, instance_profile_arn, required_az=None, scann
                             'ResourceType': 'instance',
                             'Tags': [
                                 {'Key': 'usage', 'Value': 'whoAMI-filesystem-scanner'},
-                                {'Key': 'Name', 'Value': 'whoAMI-filesystem-scanner'}
+                                {'Key': 'Name', 'Value': 'whoAMI-filesystem-scanner'},
+                                {'Key': 'Application', 'Value': 'cloud-image-investigator'},
+                                {'Key': 'Owner', 'Value': 'Seth Art'}
                             ]
                         }]
                     }
@@ -432,7 +451,9 @@ def create_secret_searcher(region, instance_profile_arn, required_az=None, scann
                         'ResourceType': 'instance',
                         'Tags': [
                             {'Key': 'usage', 'Value': 'whoAMI-filesystem-scanner'},
-                            {'Key': 'Name', 'Value': 'whoAMI-filesystem-scanner'}
+                            {'Key': 'Name', 'Value': 'whoAMI-filesystem-scanner'},
+                            {'Key': 'Application', 'Value': 'cloud-image-investigator'},
+                            {'Key': 'Owner', 'Value': 'Seth Art'}
                         ]
                     }]
                 }
@@ -597,7 +618,9 @@ def start_instance_with_target_ami(ami_object, region, is_ena=False, tried_types
                 'ResourceType': 'instance',
                 'Tags': [
                     {'Key': 'usage', 'Value': 'whoAMI-filesystem-duplicator'},
-                    {'Key': 'Name', 'Value': f'whoAMI-filesystem--duplicator-{ami_id}'}
+                    {'Key': 'Name', 'Value': f'whoAMI-filesystem--duplicator-{ami_id}'},
+                    {'Key': 'Application', 'Value': 'cloud-image-investigator'},
+                    {'Key': 'Owner', 'Value': 'Seth Art'}
                 ]
             }]
         }
@@ -621,6 +644,8 @@ def start_instance_with_target_ami(ami_object, region, is_ena=False, tried_types
                 'Tags': [
                     {'Key': 'usage', 'Value': 'whoAMI-filesystem-duplicator'},
                     {'Key': 'Name', 'Value': f'whoAMI-filesystem--duplicator-{ami_id}'},
+                    {'Key': 'Application', 'Value': 'cloud-image-investigator'},
+                    {'Key': 'Owner', 'Value': 'Seth Art'},
                     {'Key': 'VPC', 'Value': 'isolated-duplicator-vpc'},
                     {'Key': 'Security', 'Value': 'no-internet-access'}
                 ]
@@ -760,13 +785,15 @@ def move_volumes_and_terminate_instance(instance_id, instance_id_secret_searcher
                     {'Key': 'AMI', 'Value': ami},
                     {'Key': 'ScannerInstance', 'Value': instance_id_secret_searcher},
                     {'Key': 'CreatedBy', 'Value': 'CloudShovel-Digger'},
-                    {'Key': 'Purpose', 'Value': 'filesystem-scanning'}
+                    {'Key': 'Purpose', 'Value': 'filesystem-scanning'},
+                    {'Key': 'Application', 'Value': 'cloud-image-investigator'},
+                    {'Key': 'Owner', 'Value': 'Seth Art'}
                 ]
             )
             log_success(f'Tagged volume {volume_id} for cleanup identification')
         except Exception as e:
             log_warning(f'Failed to tag volume {volume_id}: {e}')
-        
+
         devices.remove(device)
         in_use_devices[device]=ami
 
@@ -1216,7 +1243,9 @@ def dig(args, session):
                         {'Key': 'AMI', 'Value': instance_duplicator_details['ami']},
                         {'Key': 'ScannerInstance', 'Value': instance_id_secret_searcher},
                         {'Key': 'CreatedBy', 'Value': 'CloudShovel-Digger'},
-                        {'Key': 'Purpose', 'Value': 'filesystem-scanning'}
+                        {'Key': 'Purpose', 'Value': 'filesystem-scanning'},
+                        {'Key': 'Application', 'Value': 'cloud-image-investigator'},
+                        {'Key': 'Owner', 'Value': 'Seth Art'}
                     ]
                 )
                 log_success(f'Tagged volume {volume_id} for cleanup identification')
