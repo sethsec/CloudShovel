@@ -1087,38 +1087,34 @@ def check_and_alert_malware_findings(target_ami, region):
         log_error(f'Could not get Slack webhook: {e}')
         return
 
-    # Build and send Slack message
+    # Build and send Slack message (flat key/value for Slack Workflow Builder webhooks)
     critical = [f for f in critical_high if f['severity'] == 'CRITICAL']
     high = [f for f in critical_high if f['severity'] == 'HIGH']
 
-    blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": f"Malware Detected: {target_ami}"}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{len(critical)} CRITICAL* | *{len(high)} HIGH*"}}
-    ]
-
+    # Build top findings summary (up to 5)
+    finding_lines = []
     for finding in critical_high[:5]:
         yara_rules = [m.get('rule', '?') for m in finding.get('yara_matches', [])]
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text":
-                f"*[{finding['severity']}]* `{finding['file_path']}`\n"
-                f"YARA: {yara_rules}\nClamAV: {finding.get('clamav_result', 'None')}"
-            }
-        })
-
+        yara_str = ', '.join(yara_rules) if yara_rules else 'None'
+        clamav_str = finding.get('clamav_result', 'None')
+        finding_lines.append(
+            f"[{finding['severity']}] {finding['file_path']} | YARA: {yara_str} | ClamAV: {clamav_str}"
+        )
     if len(critical_high) > 5:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"_...and {len(critical_high) - 5} more findings_"}
-        })
+        finding_lines.append(f"...and {len(critical_high) - 5} more findings")
 
-    blocks.append({
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": f"<https://s3.console.aws.amazon.com/s3/buckets/{unique_files_bucket}?prefix={target_ami}/|View in S3>"}
-    })
+    payload_data = {
+        "ami_id": target_ami,
+        "region": region,
+        "critical_count": str(len(critical)),
+        "high_count": str(len(high)),
+        "total_findings": str(len(critical_high)),
+        "top_findings": '\n'.join(finding_lines),
+        "s3_link": f"https://s3.console.aws.amazon.com/s3/buckets/{unique_files_bucket}?prefix={target_ami}/"
+    }
 
     try:
-        payload = json.dumps({"blocks": blocks}).encode('utf-8')
+        payload = json.dumps(payload_data).encode('utf-8')
         req = urllib.request.Request(webhook_url, data=payload, headers={'Content-Type': 'application/json'})
         urllib.request.urlopen(req, timeout=10)
         log_success(f'Slack alert sent for {target_ami}')
